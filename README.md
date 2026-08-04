@@ -50,7 +50,24 @@ tested), `samtools`, `FastQC`, `MultiQC`, and — only for `source=sra` runs —
 these via `--use-conda` (env specs in `workflow/envs/`).
 
 **Reference data** (not shipped — obtain separately):
-- A STAR index (or fasta + GTF to build one). Example: Ensembl GRCh38.98.
+- A STAR index, **or** a genome FASTA + gene GTF for the pipeline to build one
+  (`star_index` rule). Two easy sources:
+  - **10x Cell Ranger reference bundles** (convenient — one download gives FASTA +
+    GTF, already gene-filtered to match 10x conventions):
+    - Human: <https://cf.10xgenomics.com/supp/cell-exp/refdata-gex-GRCh38-2024-A.tar.gz>
+    - Mouse: <https://cf.10xgenomics.com/supp/cell-exp/refdata-gex-GRCm39-2024-A.tar.gz>
+
+    Each bundle extracts to `refdata-gex-<genome>-2024-A/` containing
+    `fasta/genome.fa` and `genes/genes.gtf.gz` (plus a prebuilt `star/` index).
+    Point `reference.fasta` / `reference.gtf` in `config.yaml` at these (gunzip
+    the GTF first — the pipeline expects an uncompressed `.gtf`). **Do not reuse
+    the bundle's prebuilt `star/` index** unless your `STAR` matches the version
+    that built it (Cell Ranger 2024-A ships a STAR 2.7.2a index; this pipeline
+    tests with 2.7.10a and index formats can be incompatible). Leave
+    `reference.star_index` pointed at an empty dir and let the `star_index` rule
+    build it once with your STAR.
+  - **Ensembl** (raw): e.g. GRCh38 primary-assembly FASTA + release GTF, if you
+    prefer unfiltered annotation.
 - A 10x barcode whitelist: `3M-february-2018.txt` (v3) or `737K-august-2016.txt`
   (v2), shipped with Cell Ranger.
 
@@ -60,11 +77,17 @@ these via `--use-conda` (env specs in `workflow/envs/`).
 git clone <your-repo-url> scrnaseq-fetch-process
 cd scrnaseq-fetch-process
 
-# 1. Create your config from the template and edit the paths in it.
-cp config/config.example.yaml config/config.yaml
-$EDITOR config/config.yaml     # set reference.*, chemistry.whitelist, sra_tools_bin
+# 1. Get a reference (example: 10x human GRCh38-2024-A). Mouse: GRCm39-2024-A.
+wget https://cf.10xgenomics.com/supp/cell-exp/refdata-gex-GRCh38-2024-A.tar.gz
+tar -xzf refdata-gex-GRCh38-2024-A.tar.gz
+gunzip -k refdata-gex-GRCh38-2024-A/genes/genes.gtf.gz   # pipeline needs an uncompressed .gtf
 
-# 2. (SLURM) point run_slurm.sh at your environment via env vars, and edit the
+# 2. Create your config from the template and edit the paths in it.
+cp config/config.example.yaml config/config.yaml
+$EDITOR config/config.yaml     # set reference.* (fasta/gtf above; leave star_index
+                               #   an empty dir to build), chemistry.whitelist, sra_tools_bin
+
+# 3. (SLURM) point run_slurm.sh at your environment via env vars, and edit the
 #    partition names in profiles/slurm/config.yaml to match your cluster.
 export SCRNASEQ_VENV=/path/to/your/venv           # optional if snakemake is already on PATH
 export SCRNASEQ_EXTRA_PATH=/opt/FastQC:/opt/sratoolkit/bin   # tool dirs not in the venv
