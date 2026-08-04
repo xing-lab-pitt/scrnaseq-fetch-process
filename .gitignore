@@ -1,0 +1,32 @@
+# Pipeline outputs and Snakemake state (large / machine-specific — never commit)
+results/
+.snakemake/
+snakemake_ctl.*.log
+*.log
+
+# Your local, path-filled config and real sample sheets (templates are committed
+# as *.example.*). Keep your machine's absolute paths out of git.
+config/config.yaml
+config/samples.tsv
+config/samples.*.tsv
+!config/samples.example.tsv
+
+# Reference data (too large / licensed — obtain per README, keep out of git)
+reference/
+*.fa
+*.fasta
+*.gtf
+*.sra
+*.fastq
+*.fastq.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

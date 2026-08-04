@@ -1,0 +1,73 @@
+# ---------------------------------------------------------------------------
+# scRNA-seq STARsolo pipeline config  (TEMPLATE)
+#
+#   cp config/config.example.yaml config/config.yaml   # then edit the paths
+#
+# Chemistry defaults reproduce 10x Chromium 3' v3. Replace every <PLACEHOLDER>
+# with a path on YOUR system. config/config.yaml is gitignored so your local
+# paths are never committed.
+# ---------------------------------------------------------------------------
+
+# Only used when run_downstream: true (points at run_pipeline.py). ncbi_utils.py
+# is vendored in workflow/scripts, so this is NOT needed for the core pipeline.
+# Leave as-is if you don't run downstream analysis.
+tools_dir: "/path/to/downstream/scripts"
+requirements_txt: "requirements-pipeline.txt"   # checked at preflight (repo-relative is fine)
+
+# Sample sheet from workflow/scripts/prepare_runs.py (or hand-written).
+# Columns: sample  srr  source  fastq_1_url  fastq_2_url  fastq_1_md5  fastq_2_md5
+samples_tsv: "config/samples.tsv"
+
+# sra-tools bin dir, used ONLY for runs whose `source` is "sra" (not mirrored on
+# ENA). Provides prefetch + fasterq-dump. Leave "" if all runs come from ENA, or
+# if prefetch/fasterq-dump are already on your PATH.
+sra_tools_bin: ""
+
+workdir: "results"
+threads: 8
+
+# Run a downstream scanpy pipeline (run_pipeline.py) on the merged matrix?
+run_downstream: false
+
+reference:
+  # Human GRCh38 (Ensembl 98 primary assembly) in the reference example below.
+  # fasta/gtf are only consumed if the STAR index has to be (re)built; if you
+  # point star_index at a prebuilt index (with SA/SAindex), the star_index rule
+  # is skipped and fasta/gtf are not read.
+  #
+  # Obtain a reference, e.g.:
+  #   fasta: ftp://ftp.ensembl.org/pub/release-98/fasta/homo_sapiens/dna/
+  #          Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+  #   gtf:   ftp://ftp.ensembl.org/pub/release-98/gtf/homo_sapiens/
+  #          Homo_sapiens.GRCh38.98.gtf.gz
+  fasta: "/path/to/GRCh38/Homo_sapiens.GRCh38.dna.primary_assembly.fa"
+  gtf: "/path/to/GRCh38/Homo_sapiens.GRCh38.98.gtf"
+  star_index: "/path/to/GRCh38/STAR"   # prebuilt index dir (has SA/SAindex) OR empty target dir to build
+  sjdb_overhang: 100
+
+# 10x Chromium 3' v3. For v2 change to: umi_len 10, clip5p "26 0", and use the
+# 737K-august-2016.txt whitelist instead of 3M-february-2018.txt.
+# 10x barcode whitelists ship with Cell Ranger, or:
+#   https://github.com/10XGenomics/... (3M-february-2018.txt for v3)
+chemistry:
+  whitelist: "/path/to/10x_whitelist/3M-february-2018.txt"
+  barcode_mate: 1
+  clip5p: "28 0"
+  cb_start: 1
+  cb_len: 16
+  umi_start: 17
+  umi_len: 12
+
+starsolo_extra: >-
+  --soloType CB_UMI_Simple
+  --soloFeatures Gene Velocyto
+  --readFilesCommand zcat
+  --outSAMtype BAM Unsorted
+
+# Deterministic QC gate on STARsolo Gene/Summary.csv. Thresholds live HERE
+# (version-controlled), not chosen at runtime, so pass/fail is reproducible.
+qc:
+  mode: strict          # strict = stop the run if any sample fails; warn = report only
+  min_valid_barcodes: 0.70
+  min_reads_mapped_gene: 0.50
+  min_estimated_cells: 100

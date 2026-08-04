@@ -1,0 +1,11 @@
+# Subset of the project's requirements.txt that the pipeline's Python steps
+# import. Pins are IDENTICAL to requirements.txt so the two never diverge.
+# check_versions.py enforces these against the active environment at preflight.
+anndata==0.10.9
+scanpy==1.12
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.17.1
+h5py==3.16.0
+pyyaml==6.0.3
+requests==2.33.1

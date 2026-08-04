@@ -1,0 +1,294 @@
+# =============================================================================
+# scRNA-seq end-to-end (Snakemake)
+#   preflight version check
+#   FASTQ download  ->  FastQC
+#   STAR index (once)
+#   STARsolo (Gene + Velocyto, per sample)
+#   deterministic QC gate (fixed thresholds)  ->  MultiQC report
+#   count matrix -> per-sample .h5ad (spliced/unspliced layers) -> merged .h5ad
+#   optional: existing scanpy pipeline (run_pipeline.py)
+#
+# Sample sheet is produced once:
+#   python workflow/scripts/prepare_runs.py GSE1234 \
+#       --tools-dir /path/to/project -o config/samples.tsv
+# then:  snakemake -n   and   snakemake --use-conda --cores 8
+# =============================================================================
+import pandas as pd
+from pathlib import Path
+
+configfile: "config/config.yaml"
+
+SCRIPTS = Path(workflow.basedir) / "scripts"
+WORK  = Path(config["workdir"])
+FASTQ = WORK / "fastq"
+ALIGN = WORK / "star"
+H5AD  = WORK / "h5ad"
+QC    = WORK / "qc"
+
+samples = pd.read_csv(config["samples_tsv"], sep="\t", dtype=str).fillna("")
+# Back-compat: sheets written before the SRA fallback have no `source` column.
+# Default those runs to "ena" so download_fastq behaves exactly as before.
+if "source" not in samples.columns:
+    samples["source"] = "ena"
+RUN = samples.set_index("srr")
+SAMPLE_RUNS = samples.groupby("sample")["srr"].apply(list).to_dict()
+SAMPLES = sorted(SAMPLE_RUNS)
+ALL_SRR = list(samples["srr"])
+
+CH = config["chemistry"]
+QCC = config["qc"]
+
+wildcard_constraints:
+    srr=r"[A-Za-z0-9]+",
+    sample=r"[^/]+",
+
+def final_matrix():
+    return (WORK / "analysis" / "processed.h5ad") if config.get("run_downstream") \
+           else (WORK / "combined.h5ad")
+
+rule all:
+    input:
+        final_matrix(),
+        QC / "multiqc_report.html",
+        QC / "qc_ok.txt",
+
+# ------------------------------ preflight ------------------------------------
+rule check_versions:
+    output:
+        touch(WORK / ".versions_ok"),
+    params:
+        req=config["requirements_txt"],
+        script=f"{SCRIPTS}/check_versions.py",
+    conda: "../envs/scanpy.yaml"
+    shell:
+        "python {params.script} {params.req}"
+
+# ------------------------------ reference ------------------------------------
+rule star_index:
+    input:
+        fasta=config["reference"]["fasta"],
+        gtf=config["reference"]["gtf"],
+    output:
+        directory(config["reference"]["star_index"]),
+    threads: config["threads"]
+    resources:
+        mem_mb=40000,
+    params:
+        overhang=config["reference"]["sjdb_overhang"],
+    conda: "../envs/tools.yaml"
+    shell:
+        r"""
+        mkdir -p {output}
+        STAR --runMode genomeGenerate \
+             --runThreadN {threads} \
+             --genomeDir {output} \
+             --genomeFastaFiles {input.fasta} \
+             --sjdbGTFfile {input.gtf} \
+             --sjdbOverhang {params.overhang}
+        """
+
+# ------------------------------ download -------------------------------------
+# Two sources per run (set by prepare_runs.py in the `source` column):
+#   ena -> ENA mirrors pre-split FASTQs; curl each URL (fast, md5-checked).
+#   sra -> run not on ENA; prefetch + fasterq-dump from SRA, then pick the
+#          barcode/cDNA reads with the SAME 2-file/3-file rule select_reads()
+#          uses for ENA (2 files: _1,_2 ; 3 files: _2,_3, dropping the I1 index).
+rule download_fastq:
+    output:
+        r1=FASTQ / "{srr}_R1.fastq.gz",   # barcode/UMI read
+        r2=FASTQ / "{srr}_R2.fastq.gz",   # cDNA read
+    params:
+        src=lambda wc: RUN.loc[wc.srr, "source"],
+        u1=lambda wc: RUN.loc[wc.srr, "fastq_1_url"],
+        u2=lambda wc: RUN.loc[wc.srr, "fastq_2_url"],
+        m1=lambda wc: RUN.loc[wc.srr, "fastq_1_md5"],
+        m2=lambda wc: RUN.loc[wc.srr, "fastq_2_md5"],
+        sra_bin=config.get("sra_tools_bin", ""),
+        tmp=lambda wc: str(FASTQ / f"_sra_{wc.srr}"),
+    threads: 4
+    retries: 3
+    conda: "../envs/tools.yaml"
+    shell:
+        r"""
+        set -euo pipefail
+        if [ "{params.src}" = "sra" ]; then
+            # --- SRA fallback: prefetch + fasterq-dump -----------------------
+            [ -n "{params.sra_bin}" ] && export PATH="{params.sra_bin}:$PATH"
+            rm -rf "{params.tmp}"; mkdir -p "{params.tmp}"
+            prefetch -O "{params.tmp}" {wildcards.srr}
+            fasterq-dump --split-files --include-technical --threads {threads} \
+                -O "{params.tmp}" "{params.tmp}/{wildcards.srr}/{wildcards.srr}.sra" \
+                || fasterq-dump --split-files --include-technical --threads {threads} \
+                     -O "{params.tmp}" {wildcards.srr}
+            # Select barcode/cDNA from the produced _1/_2[/_3] files by suffix.
+            fq=$(ls "{params.tmp}"/{wildcards.srr}_*.fastq | sort)
+            n=$(echo "$fq" | wc -l)
+            if [ "$n" -eq 2 ]; then bc=$(echo "$fq" | sed -n 1p); cd=$(echo "$fq" | sed -n 2p)
+            elif [ "$n" -eq 3 ]; then bc=$(echo "$fq" | sed -n 2p); cd=$(echo "$fq" | sed -n 3p)
+            else echo "Unexpected FASTQ count ($n) for {wildcards.srr}: $fq" >&2; exit 1; fi
+            gzip -c "$bc" > {output.r1}
+            gzip -c "$cd" > {output.r2}
+            rm -rf "{params.tmp}"
+        else
+            # --- ENA: direct download of pre-split FASTQs --------------------
+            curl -sSL --fail --retry 5 -o {output.r1} "{params.u1}"
+            curl -sSL --fail --retry 5 -o {output.r2} "{params.u2}"
+            if [ -n "{params.m1}" ]; then echo "{params.m1}  {output.r1}" | md5sum -c -; fi
+            if [ -n "{params.m2}" ]; then echo "{params.m2}  {output.r2}" | md5sum -c -; fi
+        fi
+        """
+
+# ------------------------------ read QC --------------------------------------
+rule fastqc:
+    input:
+        r1=FASTQ / "{srr}_R1.fastq.gz",
+        r2=FASTQ / "{srr}_R2.fastq.gz",
+    output:
+        z1=QC / "fastqc" / "{srr}_R1_fastqc.zip",
+        z2=QC / "fastqc" / "{srr}_R2_fastqc.zip",
+    threads: 2
+    params:
+        outdir=lambda wc: str(QC / "fastqc"),
+    conda: "../envs/tools.yaml"
+    shell:
+        "mkdir -p {params.outdir} && "
+        "fastqc -t {threads} -o {params.outdir} {input.r1} {input.r2}"
+
+# ------------------------------ alignment ------------------------------------
+def sample_r1(wc):
+    return expand(str(FASTQ / "{srr}_R1.fastq.gz"), srr=SAMPLE_RUNS[wc.sample])
+
+def sample_r2(wc):
+    return expand(str(FASTQ / "{srr}_R2.fastq.gz"), srr=SAMPLE_RUNS[wc.sample])
+
+rule starsolo:
+    input:
+        r1=sample_r1,
+        r2=sample_r2,
+        index=config["reference"]["star_index"],
+        whitelist=CH["whitelist"],
+    output:
+        solo=directory(ALIGN / "{sample}" / "Solo.out"),
+    threads: config["threads"]
+    resources:
+        mem_mb=40000,
+    params:
+        prefix=lambda wc: f"{ALIGN}/{wc.sample}/",
+        r1=lambda wc, input: ",".join(input.r1),
+        r2=lambda wc, input: ",".join(input.r2),
+        clip5p=CH["clip5p"], mate=CH["barcode_mate"],
+        cb_start=CH["cb_start"], cb_len=CH["cb_len"],
+        umi_start=CH["umi_start"], umi_len=CH["umi_len"],
+        extra=config["starsolo_extra"],
+    conda: "../envs/tools.yaml"
+    shell:
+        r"""
+        mkdir -p {params.prefix}
+        STAR --runMode alignReads \
+             --runThreadN {threads} \
+             --genomeDir {input.index} \
+             --readFilesIn {params.r1} {params.r2} \
+             --soloCBwhitelist {input.whitelist} \
+             --soloBarcodeMate {params.mate} \
+             --clip5pNbases {params.clip5p} \
+             --soloCBstart {params.cb_start} --soloCBlen {params.cb_len} \
+             --soloUMIstart {params.umi_start} --soloUMIlen {params.umi_len} \
+             --outFileNamePrefix {params.prefix} \
+             {params.extra}
+        """
+
+# ---------------------- deterministic QC gate --------------------------------
+rule qc_report:
+    input:
+        solo=expand(str(ALIGN / "{sample}" / "Solo.out"), sample=SAMPLES),
+    output:
+        report=QC / "qc_gate.tsv",
+        passlist=QC / "qc_pass.txt",
+    params:
+        entries=lambda wc: [f"{s}={ALIGN}/{s}/Solo.out/Gene/Summary.csv" for s in SAMPLES],
+        vb=QCC["min_valid_barcodes"],
+        rm=QCC["min_reads_mapped_gene"],
+        ec=QCC["min_estimated_cells"],
+        script=f"{SCRIPTS}/qc_gate.py",
+    conda: "../envs/scanpy.yaml"
+    shell:
+        "python {params.script} {params.entries} "
+        "--report {output.report} --passlist {output.passlist} "
+        "--min-valid-barcodes {params.vb} "
+        "--min-reads-mapped-gene {params.rm} "
+        "--min-estimated-cells {params.ec}"
+
+# Enforcement is separate from reporting so the report survives a failed gate.
+rule qc_check:
+    input:
+        passlist=QC / "qc_pass.txt",
+        report=QC / "qc_gate.tsv",
+    output:
+        QC / "qc_ok.txt",
+    params:
+        n=len(SAMPLES),
+        strict=(QCC["mode"] == "strict"),
+    shell:
+        r"""
+        n_pass=$(grep -c . {input.passlist} || true)
+        if [ "{params.strict}" = "True" ] && [ "$n_pass" -ne "{params.n}" ]; then
+          echo "QC gate: only $n_pass/{params.n} samples passed (mode=strict)." >&2
+          echo "See {input.report}. Fix or remove failing samples, then rerun." >&2
+          exit 1
+        fi
+        cp {input.passlist} {output}
+        """
+
+# --------------------------- matrix -> h5ad ----------------------------------
+rule to_h5ad:
+    input:
+        solo=ALIGN / "{sample}" / "Solo.out",
+        versions=WORK / ".versions_ok",
+    output:
+        H5AD / "{sample}.h5ad",
+    params:
+        script=f"{SCRIPTS}/starsolo_to_h5ad.py",
+    conda: "../envs/scanpy.yaml"
+    shell:
+        "python {params.script} {input.solo} -o {output} -s {wildcards.sample}"
+
+rule merge:
+    input:
+        h5ads=expand(str(H5AD / "{sample}.h5ad"), sample=SAMPLES),
+        gate=QC / "qc_ok.txt",
+    output:
+        WORK / "combined.h5ad",
+    params:
+        script=f"{SCRIPTS}/merge_h5ad.py",
+    conda: "../envs/scanpy.yaml"
+    shell:
+        "python {params.script} -o {output} --h5ad {input.h5ads}"
+
+# ------------------------------ MultiQC report -------------------------------
+rule multiqc:
+    input:
+        fastqc=expand(str(QC / "fastqc" / "{srr}_R{read}_fastqc.zip"),
+                      srr=ALL_SRR, read=[1, 2]),
+        solo=expand(str(ALIGN / "{sample}" / "Solo.out"), sample=SAMPLES),
+    output:
+        QC / "multiqc_report.html",
+    params:
+        outdir=lambda wc: str(QC),
+        scan=lambda wc: f"{QC}/fastqc {ALIGN}",
+    conda: "../envs/tools.yaml"
+    shell:
+        "multiqc -f -o {params.outdir} -n multiqc_report.html {params.scan}"
+
+# --------------------- optional: existing scanpy pipeline --------------------
+rule downstream:
+    input:
+        matrix=WORK / "combined.h5ad",
+        versions=WORK / ".versions_ok",
+    output:
+        WORK / "analysis" / "processed.h5ad",
+    params:
+        script=config["tools_dir"] + "/run_pipeline.py",
+        outdir=lambda wc, output: str(Path(output[0]).parent),
+    conda: "../envs/scanpy.yaml"
+    shell:
+        "python {params.script} {input.matrix} --output {params.outdir}"

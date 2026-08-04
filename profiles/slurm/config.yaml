@@ -1,0 +1,85 @@
+# =============================================================================
+# Snakemake SLURM profile for the scRNA-seq STARsolo pipeline
+#
+#   snakemake --profile profiles/slurm
+#
+# Each rule is submitted as its own right-sized SLURM job via the
+# snakemake-executor-plugin-slurm. STARsolo needs a high-memory partition
+# (~200 GB for a human genome); adjust partitions/memory below for your cluster.
+#
+# TOOLING MODEL: --use-conda is off by default here — Python deps come from an
+# activated venv/conda env and binary tools (STAR, samtools, FastQC, ...) from
+# PATH. SLURM propagates the submit environment (--export=ALL by default), so
+# activate your env and put tool dirs on PATH before launching (run_slurm.sh
+# does this from $SCRNASEQ_VENV / $SCRNASEQ_EXTRA_PATH; see README). To let
+# Snakemake manage tools instead, set use-conda: true (env specs in workflow/envs/).
+# =============================================================================
+
+executor: slurm
+jobs: 24                       # max concurrent SLURM jobs
+use-conda: false
+printshellcmds: true
+rerun-incomplete: true
+latency-wait: 60               # NFS: wait for outputs to appear after a job ends
+
+# Job-status polling. The default is `sacct`, which talks to slurmdbd. When that
+# accounting DB is down ("Connection refused ... :6819"), the executor can't see
+# jobs finish and the whole run hangs — even though the jobs themselves succeed.
+# `squeue` queries the controller directly (DB-independent). Requires the
+# cluster's MinJobAge to be long enough (e.g. 300s) that finished jobs linger in
+# squeue long enough to be polled. If your slurmdbd is healthy you can remove
+# these two lines to use the default `sacct` polling.
+slurm-status-command: squeue
+# Don't probe slurmdbd (via sacct/sacctmgr) to guess a submit account; that probe
+# also fails when the DB is down. Drop this if your cluster requires an account
+# (and set it via default-resources: slurm_account instead).
+slurm-no-account: true
+
+# >>> EDIT FOR YOUR CLUSTER <<<
+# The slurm_partition names below ("dept_cpu", "big_memory") are examples from
+# the pipeline author's cluster. Replace them with partitions that exist on
+# yours (`sinfo -s` to list). Memory/runtime are sensible defaults; STARsolo
+# needs a high-memory partition (~200 GB) for a human genome.
+
+# Default resources for every rule (overridden per-rule below).
+default-resources:
+  slurm_partition: "dept_cpu"
+  mem_mb: 8000
+  runtime: 720                 # minutes (12 h)
+  cpus_per_task: 2
+
+# Per-rule overrides. cpus_per_task mirrors each rule's threads: directive.
+set-threads:
+  starsolo: 8
+  star_index: 8
+  fastqc: 2
+
+set-resources:
+  star_index:
+    slurm_partition: "big_memory"
+    mem_mb: 100000
+    cpus_per_task: 8
+    runtime: 2880              # 48 h
+  starsolo:
+    slurm_partition: "big_memory"
+    mem_mb: 200000             # STARsolo on a human genome needs ~200 GB
+    cpus_per_task: 8
+    runtime: 2880
+  download_fastq:
+    slurm_partition: "dept_cpu"
+    mem_mb: 4000
+    cpus_per_task: 2
+    runtime: 720
+  fastqc:
+    mem_mb: 8000
+    cpus_per_task: 2
+  qc_report:
+    mem_mb: 16000
+  to_h5ad:
+    mem_mb: 32000             # loads Gene + 3 Velocyto matrices into memory
+  merge:
+    mem_mb: 64000             # concatenates all per-sample h5ads
+  multiqc:
+    mem_mb: 8000
+  downstream:
+    mem_mb: 64000

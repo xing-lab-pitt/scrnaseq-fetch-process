@@ -1,0 +1,148 @@
+# scrnaseq-fetch-process
+
+A Snakemake pipeline that turns a public **GEO/SRA accession** into per-sample
+count matrices with RNA-velocity layers, using **STARsolo**:
+
+```
+accession ──prepare_runs.py──> samples.tsv
+                                   │
+ check_versions (preflight: env must satisfy requirements)
+                                   │
+ download_fastq ─ fastqc          star_index (once, if no prebuilt index)
+        │                              │
+        └────────────► starsolo (per sample) ──► qc_gate ──► qc_check (strict)
+                             │                       │
+                        to_h5ad (per sample) ────► merge ──► [optional downstream]
+                             │
+                          multiqc report
+```
+
+Output per sample: an `.h5ad` with the standard Gene count matrix as `adata.X`
+and `spliced` / `unspliced` / `ambiguous` layers (from STARsolo's `Velocyto`
+feature — this is STARsolo itself, **not** the separate velocyto.py tool).
+
+## Features
+
+- **Any accession type** — `prepare_runs.py` resolves GSE / SRP / PRJNA / SRX /
+  SRR / GSM into a sample sheet, scoping correctly (a study gives all its runs;
+  an experiment/run gives just its own).
+- **ENA-first download with SRA fallback** — per run, prefers ENA's pre-split,
+  md5-checked FASTQs over HTTPS (`curl`); falls back to NCBI `prefetch` +
+  `fasterq-dump --include-technical` for runs ENA hasn't mirrored. Chosen
+  automatically per run (the `source` column); no global switch.
+- **Chemistry guard** — before writing the sheet, peeks the barcode read length
+  and refuses non-10x-droplet data (bulk / Smart-seq), warns on a v2/v3 mismatch.
+- **Deterministic QC gate** — pass/fail thresholds live in `config.yaml`
+  (version-controlled), applied to STARsolo's `Summary.csv`.
+- **SLURM-ready** — each rule is submitted as a right-sized job; the included
+  profile is resilient to a down `slurmdbd` (polls `squeue`, not `sacct`).
+
+## Requirements
+
+**Python** (a venv or conda env): `snakemake` ≥ 9.24 with
+`snakemake-executor-plugin-slurm`, plus the analysis pins in
+`requirements-pipeline.txt` (`anndata`, `scanpy`, `numpy`, `pandas`, `scipy`,
+`h5py`, `pyyaml`, `requests`). `check_versions.py` enforces these at preflight.
+
+**Binary tools** (not pip; from bioconda, modules, or system): `STAR` (2.7.10a
+tested), `samtools`, `FastQC`, `MultiQC`, and — only for `source=sra` runs —
+`sra-tools` (`prefetch`, `fasterq-dump`). Conda users can let Snakemake manage
+these via `--use-conda` (env specs in `workflow/envs/`).
+
+**Reference data** (not shipped — obtain separately):
+- A STAR index (or fasta + GTF to build one). Example: Ensembl GRCh38.98.
+- A 10x barcode whitelist: `3M-february-2018.txt` (v3) or `737K-august-2016.txt`
+  (v2), shipped with Cell Ranger.
+
+## Setup
+
+```bash
+git clone <your-repo-url> scrnaseq-fetch-process
+cd scrnaseq-fetch-process
+
+# 1. Create your config from the template and edit the paths in it.
+cp config/config.example.yaml config/config.yaml
+$EDITOR config/config.yaml     # set reference.*, chemistry.whitelist, sra_tools_bin
+
+# 2. (SLURM) point run_slurm.sh at your environment via env vars, and edit the
+#    partition names in profiles/slurm/config.yaml to match your cluster.
+export SCRNASEQ_VENV=/path/to/your/venv           # optional if snakemake is already on PATH
+export SCRNASEQ_EXTRA_PATH=/opt/FastQC:/opt/sratoolkit/bin   # tool dirs not in the venv
+```
+
+`config/config.yaml` and any real `samples.tsv` are gitignored, so your local
+paths never get committed.
+
+## Usage
+
+```bash
+# 1. Resolve an accession to a sample sheet (network step, run once).
+python workflow/scripts/prepare_runs.py GSE123456 -o config/samples.tsv
+#    SRX/SRR/GSM/SRP/PRJNA also work. Add --chem v2 if your config is v2.
+
+# 2. Dry-run, then submit on SLURM (controller runs as a small job; each rule
+#    becomes its own job).
+sbatch run_slurm.sh -n        # dry run
+sbatch run_slurm.sh           # full run
+
+# ...or run Snakemake directly (e.g. on a workstation, with tools on PATH):
+snakemake --profile profiles/slurm -n
+```
+
+### Smoke-test one sample first (recommended)
+
+Target one sample's `.h5ad` — this pulls the whole scientific path
+(check_versions → download_fastq → fastqc → starsolo → to_h5ad) without the
+aggregating rules (qc_gate/merge/multiqc `expand` over ALL samples, so they
+can't run on a single sample):
+
+```bash
+sbatch run_slurm.sh \
+  results/h5ad/<SAMPLE>.h5ad \
+  results/qc/fastqc/<SRR>_R1_fastqc.zip \
+  results/qc/fastqc/<SRR>_R2_fastqc.zip
+```
+
+Then verify: barcode read ~28 bp (v3) —
+`zcat results/fastq/<SRR>_R1.fastq.gz | head -2` — and the `.h5ad` has
+`spliced`/`unspliced`/`ambiguous` layers.
+
+## Chemistry
+
+Defaults are 10x Chromium 3′ **v3** (16 bp CB + 12 bp UMI, 28 bp barcode read,
+`3M-february-2018.txt`). For **v2**: set `umi_len: 10`, `clip5p: "26 0"`, and the
+`737K-august-2016.txt` whitelist in `config.yaml`. Wrong chemistry silently
+yields near-empty matrices — the QC gate's `min_valid_barcodes` catches this.
+
+## Repository layout
+
+```
+config/
+  config.example.yaml     # template — copy to config.yaml and edit
+  samples.example.tsv     # sample-sheet schema example
+workflow/
+  Snakefile               # the DAG
+  scripts/                # prepare_runs, ncbi_utils, starsolo_to_h5ad, qc_gate, ...
+  envs/                   # conda env specs (scanpy.yaml, tools.yaml)
+profiles/slurm/           # SLURM profile (edit partitions for your cluster)
+run_slurm.sh              # SLURM launcher (paths from env vars / script location)
+requirements-pipeline.txt # Python version pins (enforced at preflight)
+skill/                    # optional Claude Code agent runbook (see below)
+```
+
+## Claude Code skill (optional)
+
+`skill/SKILL.md` is an agent runbook for driving this pipeline with
+[Claude Code](https://claude.com/claude-code) — accession resolution, launch,
+hang diagnosis, and post-run verification. To use it, symlink it into your
+Claude skills directory:
+
+```bash
+ln -s "$(pwd)/skill" ~/.claude/skills/scrnaseq-fetch-process
+```
+
+It's entirely optional — the pipeline runs fine without Claude Code.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Update the copyright line with your name/lab.

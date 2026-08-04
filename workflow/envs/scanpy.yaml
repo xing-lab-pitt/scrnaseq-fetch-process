@@ -1,0 +1,26 @@
+# Python env for the count-matrix and analysis steps.
+# Versions are pinned to EXACTLY match the project's requirements.txt so the
+# pipeline and the existing scanpy stack share one consistent dependency set.
+# (Alternative: run Snakemake from inside your existing uv/venv and drop the
+#  conda: directive on the Python rules — check_versions.py enforces the pins.)
+name: scrnaseq-scanpy
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.13     # standard CPython only; NOT the free-threaded 3.13t build
+                    # (numba 0.61 does not support free-threading)
+  - anndata=0.10.9
+  - scanpy=1.12
+  - numpy=2.2.6
+  - pandas=2.3.3
+  - scipy=1.17.1
+  - h5py=3.16.0
+  - scikit-learn=1.8.0
+  - leidenalg=0.11.0
+  - igraph=1.0.0
+  - numba=0.61.2
+  - matplotlib=3.10.8
+  - seaborn=0.13.2
+  - pyyaml=6.0.3
+  - requests=2.33.1

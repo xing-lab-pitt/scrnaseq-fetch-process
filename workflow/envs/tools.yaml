@@ -1,0 +1,14 @@
+# Binary tools for the upstream stages. These are NOT Python/pip packages, so
+# they are not in requirements.txt; they come from bioconda instead.
+# IMPORTANT: build the STAR index and run alignment with the SAME STAR version.
+name: scrnaseq-tools
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - star=2.7.11b
+  - samtools=1.21
+  - fastqc=0.12.1
+  - multiqc=1.25
+  - sra-tools=3.1.1     # optional fallback to prefetch/fasterq-dump
+  - curl
