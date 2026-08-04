@@ -68,8 +68,14 @@ these via `--use-conda` (env specs in `workflow/envs/`).
     build it once with your STAR.
   - **Ensembl** (raw): e.g. GRCh38 primary-assembly FASTA + release GTF, if you
     prefer unfiltered annotation.
-- A 10x barcode whitelist: `3M-february-2018.txt` (v3) or `737K-august-2016.txt`
-  (v2), shipped with Cell Ranger.
+- A 10x barcode whitelist matching your chemistry (see [Chemistry](#chemistry)).
+  These ship with Cell Ranger (`lib/python/cellranger/barcodes/`); the
+  [Teichmann lab scg_lib_structs](https://teichlab.github.io/scg_lib_structs/methods_html/10xChromium3.html)
+  project also mirrors them:
+  - v3 / v3.1: `3M-february-2018.txt`
+  - **v4 / GEM-X**: `3M-3pgex-may-2023.txt`
+    ([download](https://teichlab.github.io/scg_lib_structs/data/10X-Genomics/3M-3pgex-may-2023.txt.gz))
+  - v2: `737K-august-2016.txt`
 
 ## Setup
 
@@ -132,10 +138,22 @@ Then verify: barcode read ~28 bp (v3) —
 
 ## Chemistry
 
-Defaults are 10x Chromium 3′ **v3** (16 bp CB + 12 bp UMI, 28 bp barcode read,
-`3M-february-2018.txt`). For **v2**: set `umi_len: 10`, `clip5p: "26 0"`, and the
-`737K-august-2016.txt` whitelist in `config.yaml`. Wrong chemistry silently
-yields near-empty matrices — the QC gate's `min_valid_barcodes` catches this.
+Defaults are 10x Chromium 3′ **v3**. Supported 3′ chemistries:
+
+| Chemistry | Barcode read | CB / UMI | `clip5p` | `umi_len` | Whitelist |
+|---|---|---|---|---|---|
+| v2 | 26 bp | 16 / 10 | `"26 0"` | `10` | `737K-august-2016.txt` |
+| **v3** / v3.1 (default) | 28 bp | 16 / 12 | `"28 0"` | `12` | `3M-february-2018.txt` |
+| **v4** / GEM-X | 28 bp | 16 / 12 | `"28 0"` | `12` | `3M-3pgex-may-2023.txt` |
+
+**v3 vs v4:** identical read geometry — the *only* difference is the whitelist. To
+run v4 data, keep the v3 geometry and just point `chemistry.whitelist` at
+`3M-3pgex-may-2023.txt`. Because read length can't distinguish them, the chemistry
+guard reports both as "v3"; pass `--chem v4` to `prepare_runs.py` and it prints a
+reminder to confirm the whitelist rather than a false mismatch warning.
+
+Wrong chemistry (or the wrong whitelist for the right geometry) silently yields
+near-empty matrices — the QC gate's `min_valid_barcodes` catches this.
 
 ## Repository layout
 

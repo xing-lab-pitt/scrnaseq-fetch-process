@@ -45,12 +45,15 @@ reference:
   star_index: "/path/to/GRCh38/STAR"   # prebuilt index dir (has SA/SAindex) OR empty target dir to build
   sjdb_overhang: 100
 
-# 10x Chromium 3' v3. For v2 change to: umi_len 10, clip5p "26 0", and use the
-# 737K-august-2016.txt whitelist instead of 3M-february-2018.txt.
-# 10x barcode whitelists ship with Cell Ranger, or:
-#   https://github.com/10XGenomics/... (3M-february-2018.txt for v3)
+# 10x Chromium 3' v3 (defaults below). Other chemistries:
+#   v2       -> umi_len 10, clip5p "26 0", whitelist 737K-august-2016.txt
+#   v4/GEM-X -> SAME geometry as v3 (umi_len 12, clip5p "28 0"); ONLY swap the
+#               whitelist to 3M-3pgex-may-2023.txt. (v3 and v4 can't be told apart
+#               by read length — the whitelist is what selects the chemistry.)
+# Whitelists ship with Cell Ranger (lib/python/cellranger/barcodes/), or:
+#   v3: 3M-february-2018.txt   v4: 3M-3pgex-may-2023.txt   v2: 737K-august-2016.txt
 chemistry:
-  whitelist: "/path/to/10x_whitelist/3M-february-2018.txt"
+  whitelist: "/path/to/10x_whitelist/3M-february-2018.txt"   # v4: 3M-3pgex-may-2023.txt
   barcode_mate: 1
   clip5p: "28 0"
   cb_start: 1

@@ -68,16 +68,25 @@ def peek_read_length(url, n_reads=2000, n_bytes=1_000_000):
     return Counter(seqs).most_common(1)[0][0]
 
 
+# v3 and v4 (GEM-X) share identical barcode geometry: 16 bp CB + 12 bp UMI = 28 bp
+# barcode read. ONLY the whitelist differs (v3: 3M-february-2018; v4/GEM-X:
+# 3M-3pgex-may-2023), so read length alone CANNOT distinguish them — the classifier
+# reports "v3" for 28 bp and the guard treats the two as geometry-equivalent.
+SAME_GEOMETRY = {"v3", "v4"}
+
+
 def classify_chemistry(bc_len, cdna_len=None):
     """Map a barcode read length to a 10x chemistry, or flag non-droplet data.
 
     Returns (chem, message) where chem is 'v3' | 'v2' | None.
-      * 28 bp -> v3 (16 CB + 12 UMI)   * 26 bp -> v2 (16 CB + 10 UMI)
+      * 28 bp -> v3 (also v4/GEM-X — same 16 CB + 12 UMI geometry; whitelist differs)
+      * 26 bp -> v2 (16 CB + 10 UMI)
       * a barcode read as long as the cDNA read (symmetric mates) -> not 10x
         droplet (bulk / full-length / Smart-seq) -> chem None, refusal message.
     """
     if bc_len in (28, 27):        # some v3 exports trim by 1
-        return "v3", f"barcode read {bc_len} bp -> 10x 3' v3 (16 CB + 12 UMI)"
+        return "v3", (f"barcode read {bc_len} bp -> 10x 3' v3 or v4/GEM-X "
+                      "(16 CB + 12 UMI; whitelist distinguishes them)")
     if bc_len in (26, 24):        # v2: 16 CB + 10 UMI (some trimmed)
         return "v2", f"barcode read {bc_len} bp -> 10x 3' v2 (16 CB + 10 UMI)"
     if cdna_len is not None and bc_len >= cdna_len - 5:
@@ -216,7 +225,14 @@ def check_chemistry(rows, expected="v3"):
             f"  {msg}\n"
             "  For bulk / full-length / Smart-seq data use a different pipeline "
             "(plain STAR alignReads + featureCounts), not this one.")
-    if chem != expected:
+    # v3 and v4 look identical here (both 28 bp) — the length classifier always
+    # says "v3". Don't warn when the user declared v4; just remind them the
+    # whitelist is what makes it v4, since we can't verify that from read length.
+    if {chem, expected} <= SAME_GEOMETRY and chem != expected:
+        print(f"  NOTE: read length can't tell v3 from v4 (both 28 bp). You declared "
+              f"{expected}; make sure config.yaml points at the {expected} whitelist "
+              "(v4/GEM-X: 3M-3pgex-may-2023.txt; v3: 3M-february-2018.txt).")
+    elif chem != expected:
         print(f"  WARNING: detected {chem} but config.yaml is set for {expected}. "
               f"Update config chemistry (v2: umi_len 10, clip5p '26 0', 737K "
               "whitelist) before running, or matrices will be near-empty.")
@@ -230,8 +246,10 @@ def main():
     ap.add_argument("--tools-dir", default=None,
                     help="Optional dir to prepend to sys.path for ncbi_utils. "
                          "Not needed when ncbi_utils.py sits next to this script.")
-    ap.add_argument("--chem", default="v3", choices=["v2", "v3"],
-                    help="Chemistry the config is set for; guard warns on mismatch.")
+    ap.add_argument("--chem", default="v3", choices=["v2", "v3", "v4"],
+                    help="Chemistry the config is set for; guard warns on mismatch. "
+                         "v3 and v4 (GEM-X) share geometry — v4 only changes the "
+                         "whitelist (3M-3pgex-may-2023.txt).")
     ap.add_argument("--no-chem-check", action="store_true",
                     help="Skip the pre-write chemistry guard (peek + refuse).")
     args = ap.parse_args()
