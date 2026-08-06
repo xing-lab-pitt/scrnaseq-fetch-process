@@ -140,11 +140,15 @@ Then verify: barcode read ~28 bp (v3) —
 
 Defaults are 10x Chromium 3′ **v3**. Supported 3′ chemistries:
 
-| Chemistry | Barcode read | CB / UMI | `clip5p` | `umi_len` | Whitelist |
-|---|---|---|---|---|---|
-| v2 | 26 bp | 16 / 10 | `"26 0"` | `10` | `737K-august-2016.txt` |
-| **v3** / v3.1 (default) | 28 bp | 16 / 12 | `"28 0"` | `12` | `3M-february-2018.txt` |
-| **v4** / GEM-X | 28 bp | 16 / 12 | `"28 0"` | `12` | `3M-3pgex-may-2023.txt` |
+| Chemistry | Barcode read | CB / UMI | `umi_len` | Whitelist |
+|---|---|---|---|---|
+| v2 | 26 bp | 16 / 10 | `10` | `737K-august-2016.txt` |
+| **v3** / v3.1 (default) | 28 bp | 16 / 12 | `12` | `3M-february-2018.txt` |
+| **v4** / GEM-X | 28 bp | 16 / 12 | `12` | `3M-3pgex-may-2023.txt` |
+
+The barcode+UMI read and the cDNA read are separate FASTQs, so STARsolo runs in
+the standard two-file mode — the barcode read is never clipped, and there is no
+`clip5p`/`barcode_mate` setting to tune.
 
 **v3 vs v4:** identical read geometry — the *only* difference is the whitelist. To
 run v4 data, keep the v3 geometry and just point `chemistry.whitelist` at

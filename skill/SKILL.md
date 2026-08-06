@@ -63,7 +63,7 @@ Accession scoping (handled automatically):
 `prepare_runs.py` peeks the barcode read (HTTP range request, no full download) and:
 - 28 bp → 10x 3′ **v3** (16 CB + 12 UMI) — matches current `config/config.yaml`.
 - 26 bp → 10x 3′ **v2** (16 CB + 10 UMI) — **warns**; switch config to v2 first
-  (`umi_len: 10`, `clip5p: "26 0"`, 737K-august-2016 whitelist) or matrices are near-empty.
+  (`umi_len: 10`, 737K-august-2016 whitelist) or matrices are near-empty.
 - symmetric equal-length mates (e.g. 101/101, 151/151) → **refuses, exit 1, no sheet
   written**: this is bulk / full-length / Smart-seq, not droplet. Use a different
   pipeline (plain STAR alignReads + featureCounts), not this one.
@@ -142,7 +142,8 @@ downstream scanpy analysis (QC, clustering, UMAP, DE).
 | `prepare_runs.py` HTTP 400 from ENA | transient API error | Re-run; it usually succeeds on retry. |
 | SRX/SRR gives whole-study runs | scoping regression | `build_rows` restricts sub-study accessions; confirm `is_substudy` branch in `prepare_runs.py`. |
 | ENA has only 1 file for a 10x run | barcode read marked "technical", not mirrored | Expected — that run is routed to `source=sra` automatically. |
-| STARsolo matrices near-empty | chemistry mismatch (v2 data, v3 config) | Set config to detected chemistry (v2: `umi_len 10`, `clip5p "26 0"`, 737K whitelist) and rerun. |
+| STARsolo matrices near-empty | chemistry mismatch (v2 data, v3 config) | Set config to detected chemistry (v2: `umi_len 10`, 737K whitelist) and rerun. |
+| High genome mapping but ~3% reads mapped to **gene** | someone re-added `--soloBarcodeMate`/`--clip5pNbases` — that clips the separate barcode read down to 0bp of cDNA | Use the standard two-file `starsolo` rule (cDNA read first, barcode read second, no clip). See the comment in `workflow/Snakefile`. |
 | fasterq-dump "cannot connect to external services" on login node | run on login node | Harmless for the rule — it prefetches the `.sra` first, then fasterq-dumps the local file on the compute node (no network). |
 
 ## Decision: skill vs. rewriting the pipeline
@@ -167,5 +168,5 @@ operational (stale locks) — none argue for abandoning Snakemake.
 > standard `Gene/` matrix as `adata.X`.
 - `workflow/Snakefile` — rules; `download_fastq` branches on `source`.
 - `profiles/slurm/config.yaml` — SLURM profile + per-rule resources + sacct/squeue fix.
-- `config/config.yaml` — chemistry (umi_len, clip5p, whitelist), reference paths.
+- `config/config.yaml` — chemistry (umi_len, whitelist), reference paths.
 - `run_slurm.sh` — controller launcher (venv + PATH + `snakemake --profile`).

@@ -176,21 +176,27 @@ rule starsolo:
         prefix=lambda wc: f"{ALIGN}/{wc.sample}/",
         r1=lambda wc, input: ",".join(input.r1),
         r2=lambda wc, input: ",".join(input.r2),
-        clip5p=CH["clip5p"], mate=CH["barcode_mate"],
         cb_start=CH["cb_start"], cb_len=CH["cb_len"],
         umi_start=CH["umi_start"], umi_len=CH["umi_len"],
         extra=config["starsolo_extra"],
     conda: "../envs/tools.yaml"
     shell:
+        # Standard 10x two-file layout: barcode+UMI and cDNA are SEPARATE fastqs
+        # (v2 R1=26bp, v3/v4 R1=28bp; R2=cDNA). STARsolo expects the cDNA read
+        # FIRST and the CB+UMI read SECOND; the CB/UMI coords below index into
+        # that 2nd read. Do NOT add --soloBarcodeMate/--clip5pNbases here — that
+        # mode is for chemistries where the barcode is EMBEDDED in a read that
+        # also carries cDNA, and it force-clips the barcode read down to 0bp of
+        # cDNA (e.g. clip "26 0" on a 26bp R1 leaves nothing to align), which
+        # collapses gene assignment. Verified on a 10x v2 library: this standard
+        # form -> 64% reads mapped to gene; the soloBarcodeMate form -> 3.4%.
         r"""
         mkdir -p {params.prefix}
         STAR --runMode alignReads \
              --runThreadN {threads} \
              --genomeDir {input.index} \
-             --readFilesIn {params.r1} {params.r2} \
+             --readFilesIn {params.r2} {params.r1} \
              --soloCBwhitelist {input.whitelist} \
-             --soloBarcodeMate {params.mate} \
-             --clip5pNbases {params.clip5p} \
              --soloCBstart {params.cb_start} --soloCBlen {params.cb_len} \
              --soloUMIstart {params.umi_start} --soloUMIlen {params.umi_len} \
              --outFileNamePrefix {params.prefix} \

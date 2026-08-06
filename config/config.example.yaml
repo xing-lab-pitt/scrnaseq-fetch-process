@@ -46,16 +46,17 @@ reference:
   sjdb_overhang: 100
 
 # 10x Chromium 3' v3 (defaults below). Other chemistries:
-#   v2       -> umi_len 10, clip5p "26 0", whitelist 737K-august-2016.txt
-#   v4/GEM-X -> SAME geometry as v3 (umi_len 12, clip5p "28 0"); ONLY swap the
-#               whitelist to 3M-3pgex-may-2023.txt. (v3 and v4 can't be told apart
-#               by read length — the whitelist is what selects the chemistry.)
+#   v2       -> umi_len 10, whitelist 737K-august-2016.txt (R1 is 26bp)
+#   v4/GEM-X -> SAME geometry as v3 (umi_len 12); ONLY swap the whitelist to
+#               3M-3pgex-may-2023.txt. (v3 and v4 can't be told apart by read
+#               length — the whitelist is what selects the chemistry.)
 # Whitelists ship with Cell Ranger (lib/python/cellranger/barcodes/), or:
 #   v3: 3M-february-2018.txt   v4: 3M-3pgex-may-2023.txt   v2: 737K-august-2016.txt
+# NOTE: barcode+UMI and cDNA are separate FASTQs for all 10x 3' chemistries, so
+# the starsolo rule uses the standard two-file form (cDNA first, barcode second)
+# and does NOT clip the barcode read — there is no barcode_mate/clip5p key.
 chemistry:
   whitelist: "/path/to/10x_whitelist/3M-february-2018.txt"   # v4: 3M-3pgex-may-2023.txt
-  barcode_mate: 1
-  clip5p: "28 0"
   cb_start: 1
   cb_len: 16
   umi_start: 17

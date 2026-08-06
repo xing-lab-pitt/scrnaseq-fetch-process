@@ -10,9 +10,10 @@ TSV with one row per sequencing run:
 "sra" when the run is only in SRA (downloaded via prefetch + fasterq-dump).
 Every run known to NCBI appears, so runs absent from ENA are NOT dropped.
 
-Convention: fastq_1 = the barcode/UMI read (10x R1), fastq_2 = the cDNA read (R2),
-matching the STARsolo invocation (--soloBarcodeMate 1). Runs are grouped into
-samples by GSM so multiple runs/lanes of one sample are merged at alignment time.
+Convention: fastq_1 = the barcode/UMI read (10x R1), fastq_2 = the cDNA read (R2).
+STARsolo aligns them in the standard two-file mode (cDNA read first, barcode read
+second). Runs are grouped into samples by GSM so multiple runs/lanes of one sample
+are merged at alignment time.
 
 IMPORTANT: SRA/ENA sometimes exports three files (I1 index + R1 + R2) and the
 numeric suffix does NOT always map to R1/R2. Always verify read lengths of the
@@ -234,7 +235,7 @@ def check_chemistry(rows, expected="v3"):
               "(v4/GEM-X: 3M-3pgex-may-2023.txt; v3: 3M-february-2018.txt).")
     elif chem != expected:
         print(f"  WARNING: detected {chem} but config.yaml is set for {expected}. "
-              f"Update config chemistry (v2: umi_len 10, clip5p '26 0', 737K "
+              f"Update config chemistry (v2: umi_len 10, 737K-august-2016 "
               "whitelist) before running, or matrices will be near-empty.")
     return chem
 
