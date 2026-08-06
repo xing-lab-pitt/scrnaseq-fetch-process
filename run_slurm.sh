@@ -8,6 +8,18 @@
 # Extra args are passed through to snakemake (e.g. -n for a dry run, or a
 # specific target path to run one rule).
 #
+# WHERE THE STAR INDEX IS STORED (custom directory):
+#   The index location is a CONFIG setting, not a flag here. In config/config.yaml
+#   set reference.star_index to the directory you want the built index kept in:
+#     reference:
+#       star_index: "/path/to/refs/STAR_rebuild"   # writable dir to build+keep it in
+#   rule resolve_star_index then builds a fresh index INTO that dir (once) and
+#   symlinks <workdir>/star_index -> it; later runs reuse it (no rebuild). If it
+#   already holds a genomeVersion-compatible index, it is symlinked as-is. Leave
+#   star_index "" to build into the (ephemeral) workdir instead. To force one build
+#   without a full run, target that path directly:
+#     sbatch run_slurm.sh <workdir>/star_index      # <workdir> = config workdir
+#
 # CONFIGURE FOR YOUR SITE via environment variables (all optional):
 #   SCRNASEQ_VENV       path to a Python venv to activate (snakemake, executor
 #                       plugin, multiqc, scanpy). If unset, snakemake must already
