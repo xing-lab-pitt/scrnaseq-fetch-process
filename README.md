@@ -65,8 +65,12 @@ these via `--use-conda` (env specs in `workflow/envs/`).
     checks its `genomeVersion` against your STAR and only reuses it if compatible,
     otherwise it rebuilds from fasta+gtf automatically. (Cell Ranger 2024-A ships
     a STAR 2.7.1a index; a 2.7.10a STAR can't load it, so the resolver rebuilds —
-    no manual intervention, no "Genome version INCOMPATIBLE" abort.) Leave
-    `reference.star_index` as `""` to always build.
+    no manual intervention, no "Genome version INCOMPATIBLE" abort.) When a rebuild
+    is needed and `reference.star_index` names a *writable* path (e.g. a sibling
+    `STAR_rebuild/` dir), the resolver builds the fresh index **into that path** so
+    it persists — the next run finds a compatible index there and just symlinks it
+    (no repeated ~30-min rebuild). Leave `reference.star_index` as `""` to always
+    build into the (ephemeral) workdir instead.
   - **Ensembl** (raw): e.g. GRCh38 primary-assembly FASTA + release GTF, if you
     prefer unfiltered annotation.
 - A 10x barcode whitelist matching your chemistry (see [Chemistry](#chemistry)).

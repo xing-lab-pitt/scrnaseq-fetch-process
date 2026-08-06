@@ -31,13 +31,18 @@ run_downstream: false
 
 reference:
   # Human GRCh38 (Ensembl 98 primary assembly) in the reference example below.
-  # star_index below is an OPTIONAL prebuilt-index HINT, not the index the aligner
-  # reads directly. rule resolve_star_index probes what the pipeline's STAR speaks
-  # (genomeVersion) and: if this hint matches -> symlinks it into <workdir>/star_index
-  # (instant, no rebuild); if it mismatches or is absent -> rebuilds from fasta+gtf.
-  # This guarantees the index and aligner come from the same STAR (no "Genome
-  # version INCOMPATIBLE" aborts). fasta/gtf must be valid whenever a (re)build
-  # might be needed; leave star_index "" to always build.
+  # star_index below is an OPTIONAL prebuilt-index HINT/path, not the index the
+  # aligner reads directly. rule resolve_star_index probes what the pipeline's STAR
+  # speaks (genomeVersion) and:
+  #   * hint matches   -> symlinks it into <workdir>/star_index (instant, no rebuild)
+  #   * hint mismatches / not yet an index, but the PATH is set -> builds a fresh
+  #     index INTO that path (so it is durable and reused next run — the next run's
+  #     match branch just symlinks it, no rebuild), then symlinks <workdir>/star_index
+  #     -> it. Point this at a writable dir you want to keep the built index in.
+  #   * star_index "" -> always builds into <workdir>/star_index (ephemeral).
+  # Either way the aligner only reads <workdir>/star_index, so the index and aligner
+  # come from the same STAR (no "Genome version INCOMPATIBLE" aborts). fasta/gtf must
+  # be valid whenever a (re)build might be needed.
   #
   # Obtain a reference, e.g.:
   #   fasta: ftp://ftp.ensembl.org/pub/release-98/fasta/homo_sapiens/dna/
@@ -46,7 +51,7 @@ reference:
   #          Homo_sapiens.GRCh38.98.gtf.gz
   fasta: "/path/to/GRCh38/Homo_sapiens.GRCh38.dna.primary_assembly.fa"
   gtf: "/path/to/GRCh38/Homo_sapiens.GRCh38.98.gtf"
-  star_index: "/path/to/GRCh38/STAR"   # prebuilt-index HINT (or "" to always build); resolver validates genomeVersion
+  star_index: "/path/to/GRCh38/STAR"   # prebuilt-index HINT, or a writable dir to build+keep the index in (or "" to build ephemerally); resolver validates genomeVersion
   sjdb_overhang: 100
 
 # 10x Chromium 3' v3 (defaults below). Other chemistries:

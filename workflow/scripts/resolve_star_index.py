@@ -32,6 +32,17 @@ def _star() -> str:
     return exe
 
 
+def _symlink(out: Path, target: Path):
+    """Point the pipeline-owned `out` at an index dir that lives elsewhere."""
+    if out.is_symlink() or out.exists():
+        if out.is_symlink() or out.is_file():
+            out.unlink()
+        else:
+            shutil.rmtree(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.symlink_to(target.resolve())
+
+
 def _genome_version(index_dir: Path):
     """Read `versionGenome` from an index's genomeParameters.txt, or None."""
     params = index_dir / "genomeParameters.txt"
@@ -94,13 +105,7 @@ def main():
         have = _genome_version(supplied)
         if have == native:
             # Compatible -> reuse in place via symlink (no copy, no rebuild).
-            if out.is_symlink() or out.exists():
-                if out.is_symlink() or out.is_file():
-                    out.unlink()
-                else:
-                    shutil.rmtree(out)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.symlink_to(supplied.resolve())
+            _symlink(out, supplied)
             print(f"[resolve_star_index] supplied index {supplied} is genomeVersion "
                   f"{have} == native; symlinked -> {out} (no rebuild).")
             return
@@ -113,9 +118,20 @@ def main():
     else:
         print("[resolve_star_index] no prebuilt index supplied; building from fasta+gtf.")
 
-    build_index(out, args.fasta, args.gtf, args.overhang, args.threads)
-    built = _genome_version(out)
-    print(f"[resolve_star_index] built index at {out} (genomeVersion {built}).")
+    # Where the index bytes physically land. If a --supplied path was given, build
+    # there so the index is DURABLE (survives the ephemeral workdir and is reused on
+    # the next run — the compatible branch above will then just symlink it, no
+    # rebuild). WORK/star_index is then a symlink to it, so the pipeline still owns
+    # the path the aligner reads. With no --supplied path, build directly into out.
+    dest = supplied if (supplied and supplied != out) else out
+    build_index(dest, args.fasta, args.gtf, args.overhang, args.threads)
+    built = _genome_version(dest)
+    if dest != out:
+        _symlink(out, dest)
+        print(f"[resolve_star_index] built index at {dest} (genomeVersion {built}); "
+              f"symlinked -> {out}.")
+    else:
+        print(f"[resolve_star_index] built index at {out} (genomeVersion {built}).")
 
 
 if __name__ == "__main__":
