@@ -8,7 +8,7 @@ accession ──prepare_runs.py──> samples.tsv
                                    │
  check_versions (preflight: env must satisfy requirements)
                                    │
- download_fastq ─ fastqc          star_index (once, if no prebuilt index)
+ download_fastq ─ fastqc          resolve_star_index (symlink if compatible, else build)
         │                              │
         └────────────► starsolo (per sample) ──► qc_gate ──► qc_check (strict)
                              │                       │
@@ -60,12 +60,13 @@ these via `--use-conda` (env specs in `workflow/envs/`).
     Each bundle extracts to `refdata-gex-<genome>-2024-A/` containing
     `fasta/genome.fa` and `genes/genes.gtf.gz` (plus a prebuilt `star/` index).
     Point `reference.fasta` / `reference.gtf` in `config.yaml` at these (gunzip
-    the GTF first — the pipeline expects an uncompressed `.gtf`). **Do not reuse
-    the bundle's prebuilt `star/` index** unless your `STAR` matches the version
-    that built it (Cell Ranger 2024-A ships a STAR 2.7.2a index; this pipeline
-    tests with 2.7.10a and index formats can be incompatible). Leave
-    `reference.star_index` pointed at an empty dir and let the `star_index` rule
-    build it once with your STAR.
+    the GTF first — the pipeline expects an uncompressed `.gtf`). You *may* point
+    `reference.star_index` at the bundle's `star/` index: `resolve_star_index`
+    checks its `genomeVersion` against your STAR and only reuses it if compatible,
+    otherwise it rebuilds from fasta+gtf automatically. (Cell Ranger 2024-A ships
+    a STAR 2.7.1a index; a 2.7.10a STAR can't load it, so the resolver rebuilds —
+    no manual intervention, no "Genome version INCOMPATIBLE" abort.) Leave
+    `reference.star_index` as `""` to always build.
   - **Ensembl** (raw): e.g. GRCh38 primary-assembly FASTA + release GTF, if you
     prefer unfiltered annotation.
 - A 10x barcode whitelist matching your chemistry (see [Chemistry](#chemistry)).

@@ -24,6 +24,9 @@ FASTQ = WORK / "fastq"
 ALIGN = WORK / "star"
 H5AD  = WORK / "h5ad"
 QC    = WORK / "qc"
+# The index the aligner consumes is always this pipeline-owned path (produced by
+# rule resolve_star_index), never config's star_index directly — see that rule.
+STAR_INDEX = WORK / "star_index"
 
 samples = pd.read_csv(config["samples_tsv"], sep="\t", dtype=str).fillna("")
 # Back-compat: sheets written before the SRA fallback have no `source` column.
@@ -64,27 +67,34 @@ rule check_versions:
         "python {params.script} {params.req}"
 
 # ------------------------------ reference ------------------------------------
-rule star_index:
-    input:
-        fasta=config["reference"]["fasta"],
-        gtf=config["reference"]["gtf"],
+# The index the aligner uses is a PIPELINE OUTPUT (STAR_INDEX below), never the
+# hand-supplied artifact directly. One principle: the index and the aligner must
+# come from the same environment. resolve_star_index.py probes what this STAR
+# speaks (genomeVersion) and either symlinks a compatible supplied index in
+# (instant) or rebuilds from fasta+gtf on mismatch/absence. So a version mismatch
+# is impossible by construction — starsolo can only read STAR_INDEX.
+rule resolve_star_index:
     output:
-        directory(config["reference"]["star_index"]),
+        directory(STAR_INDEX),
     threads: config["threads"]
     resources:
         mem_mb=40000,
     params:
+        supplied=config["reference"].get("star_index", ""),
+        fasta=config["reference"].get("fasta", ""),
+        gtf=config["reference"].get("gtf", ""),
         overhang=config["reference"]["sjdb_overhang"],
+        script=f"{SCRIPTS}/resolve_star_index.py",
     conda: "../envs/tools.yaml"
     shell:
         r"""
-        mkdir -p {output}
-        STAR --runMode genomeGenerate \
-             --runThreadN {threads} \
-             --genomeDir {output} \
-             --genomeFastaFiles {input.fasta} \
-             --sjdbGTFfile {input.gtf} \
-             --sjdbOverhang {params.overhang}
+        python {params.script} \
+            --out {output} \
+            --supplied "{params.supplied}" \
+            --fasta "{params.fasta}" \
+            --gtf "{params.gtf}" \
+            --overhang {params.overhang} \
+            --threads {threads}
         """
 
 # ------------------------------ download -------------------------------------
@@ -165,7 +175,7 @@ rule starsolo:
     input:
         r1=sample_r1,
         r2=sample_r2,
-        index=config["reference"]["star_index"],
+        index=STAR_INDEX,
         whitelist=CH["whitelist"],
     output:
         solo=directory(ALIGN / "{sample}" / "Solo.out"),

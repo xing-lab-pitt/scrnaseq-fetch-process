@@ -32,8 +32,11 @@ below run from there.
 - Binary tools (STAR, samtools, FastQC, MultiQC; sra-tools only for `source=sra`)
   on PATH — via `$SCRNASEQ_EXTRA_PATH`, conda, or modules.
 - A STAR index + 10x whitelist configured in `config/config.yaml` (copied from
-  `config/config.example.yaml`). If `reference.star_index` is a prebuilt index,
-  the `star_index` rule is skipped.
+  `config/config.example.yaml`). `reference.star_index` is only a HINT: rule
+  `resolve_star_index` checks its `genomeVersion` against the pipeline's STAR and
+  either symlinks it into `<workdir>/star_index` (compatible) or rebuilds from
+  fasta+gtf (mismatch/absent). The aligner only ever reads that pipeline-owned
+  index, so the index and aligner always come from the same STAR.
 
 Never edit outside `$PIPE`. All fixes here stay in `$PIPE` (mainly `profiles/slurm/config.yaml` and `config/`).
 
@@ -143,6 +146,7 @@ downstream scanpy analysis (QC, clustering, UMAP, DE).
 | SRX/SRR gives whole-study runs | scoping regression | `build_rows` restricts sub-study accessions; confirm `is_substudy` branch in `prepare_runs.py`. |
 | ENA has only 1 file for a 10x run | barcode read marked "technical", not mirrored | Expected — that run is routed to `source=sra` automatically. |
 | STARsolo matrices near-empty | chemistry mismatch (v2 data, v3 config) | Set config to detected chemistry (v2: `umi_len 10`, 737K whitelist) and rerun. |
+| STARsolo aborts `EXITING because of FATAL ERROR: Genome version … is INCOMPATIBLE` | a hand-supplied `star_index` was built by a different STAR (e.g. a 10x refdata `star/` = 2.7.1a vs your 2.7.10a) | Should not happen: `resolve_star_index` validates `genomeVersion` and rebuilds on mismatch. If you see it, the aligner read an index other than `<workdir>/star_index` — confirm the `starsolo` rule's `index` input is `STAR_INDEX`, then delete `<workdir>/star_index` and rerun so the resolver regenerates it. |
 | High genome mapping but ~3% reads mapped to **gene** | someone re-added `--soloBarcodeMate`/`--clip5pNbases` — that clips the separate barcode read down to 0bp of cDNA | Use the standard two-file `starsolo` rule (cDNA read first, barcode read second, no clip). See the comment in `workflow/Snakefile`. |
 | fasterq-dump "cannot connect to external services" on login node | run on login node | Harmless for the rule — it prefetches the `.sra` first, then fasterq-dumps the local file on the compute node (no network). |
 
