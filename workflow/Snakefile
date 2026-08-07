@@ -33,13 +33,45 @@ samples = pd.read_csv(config["samples_tsv"], sep="\t", dtype=str).fillna("")
 # Default those runs to "ena" so download_fastq behaves exactly as before.
 if "source" not in samples.columns:
     samples["source"] = "ena"
+# Back-compat: sheets written before auto-chemistry have no `chemistry` column.
+# Default to the config's static chemistry setting.
+if "chemistry" not in samples.columns:
+    samples["chemistry"] = ""
+
 RUN = samples.set_index("srr")
 SAMPLE_RUNS = samples.groupby("sample")["srr"].apply(list).to_dict()
 SAMPLES = sorted(SAMPLE_RUNS)
 ALL_SRR = list(samples["srr"])
 
-CH = config["chemistry"]
+# Chemistry: map v2/v3/v4 to actual parameters
+CHEM_PARAMS = {
+    "v2": {"umi_len": 10, "whitelist_suffix": "737K-august-2016.txt"},
+    "v3": {"umi_len": 12, "whitelist_suffix": "3M-february-2018.txt"},
+    "v4": {"umi_len": 12, "whitelist_suffix": "3M-3pgex-may-2023.txt"},
+}
+
+CH = config["chemistry"]  # fallback/default
 QCC = config["qc"]
+
+def get_sample_chemistry(sample):
+    """Get chemistry params for a sample, auto-detected or from config."""
+    # Get first SRR for this sample
+    srrs = SAMPLE_RUNS[sample]
+    detected = RUN.loc[srrs[0], "chemistry"] if srrs else ""
+
+    if detected and detected in CHEM_PARAMS:
+        # Use auto-detected chemistry
+        params = CHEM_PARAMS[detected].copy()
+        # Build whitelist path from suffix
+        whitelist_dir = Path(CH["whitelist"]).parent
+        params["whitelist"] = str(whitelist_dir / params["whitelist_suffix"])
+        params["cb_start"] = CH["cb_start"]
+        params["cb_len"] = CH["cb_len"]
+        params["umi_start"] = CH["umi_start"]
+        return params
+    else:
+        # Fall back to config (static chemistry)
+        return CH
 
 wildcard_constraints:
     srr=r"[A-Za-z0-9]+",
@@ -165,9 +197,10 @@ rule fastqc:
         "fastqc -t {threads} -o {params.outdir} {input.r1} {input.r2}"
 
 # ------------------------------ alignment ------------------------------------
+# return list of R1 FASTQs
 def sample_r1(wc):
     return expand(str(FASTQ / "{srr}_R1.fastq.gz"), srr=SAMPLE_RUNS[wc.sample])
-
+# return list of R2 FASTQs
 def sample_r2(wc):
     return expand(str(FASTQ / "{srr}_R2.fastq.gz"), srr=SAMPLE_RUNS[wc.sample])
 
@@ -176,7 +209,7 @@ rule starsolo:
         r1=sample_r1,
         r2=sample_r2,
         index=STAR_INDEX,
-        whitelist=CH["whitelist"],
+        whitelist=lambda wc: get_sample_chemistry(wc.sample)["whitelist"],
     output:
         solo=directory(ALIGN / "{sample}" / "Solo.out"),
     threads: config["threads"]
@@ -184,10 +217,14 @@ rule starsolo:
         mem_mb=40000,
     params:
         prefix=lambda wc: f"{ALIGN}/{wc.sample}/",
+        # convert lists into comma-separated strings
         r1=lambda wc, input: ",".join(input.r1),
         r2=lambda wc, input: ",".join(input.r2),
-        cb_start=CH["cb_start"], cb_len=CH["cb_len"],
-        umi_start=CH["umi_start"], umi_len=CH["umi_len"],
+        # Chemistry params: auto-detected per sample, or from config
+        cb_start=lambda wc: get_sample_chemistry(wc.sample)["cb_start"],
+        cb_len=lambda wc: get_sample_chemistry(wc.sample)["cb_len"],
+        umi_start=lambda wc: get_sample_chemistry(wc.sample)["umi_start"],
+        umi_len=lambda wc: get_sample_chemistry(wc.sample)["umi_len"],
         extra=config["starsolo_extra"],
     conda: "../envs/tools.yaml"
     shell:
@@ -200,6 +237,8 @@ rule starsolo:
         # cDNA (e.g. clip "26 0" on a 26bp R1 leaves nothing to align), which
         # collapses gene assignment. Verified on a 10x v2 library: this standard
         # form -> 64% reads mapped to gene; the soloBarcodeMate form -> 3.4%.
+
+        # STAR reads MULTIPLE FASTQs simultaneously
         r"""
         mkdir -p {params.prefix}
         STAR --runMode alignReads \

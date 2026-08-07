@@ -60,16 +60,18 @@ reference:
 #               3M-3pgex-may-2023.txt. (v3 and v4 can't be told apart by read
 #               length — the whitelist is what selects the chemistry.)
 # Whitelists ship with Cell Ranger (lib/python/cellranger/barcodes/), or:
-#   v3: 3M-february-2018.txt   v4: 3M-3pgex-may-2023.txt   v2: 737K-august-2016.txt
+#   v2: 737K-august-2016.txt (26bp barcode: 16 CB + 10 UMI)
+#   v3: 3M-february-2018.txt (28bp barcode: 16 CB + 12 UMI)
+#   v4: 3M-3pgex-may-2023.txt (28bp barcode: 16 CB + 12 UMI)
 # NOTE: barcode+UMI and cDNA are separate FASTQs for all 10x 3' chemistries, so
 # the starsolo rule uses the standard two-file form (cDNA first, barcode second)
-# and does NOT clip the barcode read — there is no barcode_mate/clip5p key.
+# and does NOT use --soloBarcodeMate/--clip5pNbases (no barcode_mate/clip5p keys).
 chemistry:
-  whitelist: "/path/to/10x_whitelist/3M-february-2018.txt"   # v4: 3M-3pgex-may-2023.txt
+  whitelist: "/path/to/10x_whitelist/3M-february-2018.txt"   # v3 (28bp barcode)
   cb_start: 1
   cb_len: 16
   umi_start: 17
-  umi_len: 12
+  umi_len: 12   # v2: 10, v3/v4: 12
 
 starsolo_extra: >-
   --soloType CB_UMI_Simple

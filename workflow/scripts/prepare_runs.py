@@ -144,6 +144,9 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
                 the barcode read was submitted as "technical"; download from SRA
                 via prefetch + fasterq-dump --include-technical (Snakefile branch).
 
+    Each row also gets a `chemistry` column (v2/v3) based on barcode read length,
+    or empty string if undetectable (SRA-only; verified after download).
+
     The full SRR list comes from NCBI runinfo (srr_to_gsm), so runs missing
     from ENA still appear in the sheet instead of being silently dropped.
     """
@@ -171,9 +174,29 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
     for srr in all_srr:
         info = ena.get(srr)
         bc_url = cdna_url = None
+        detected_chem = ""  # empty for SRA (detected after download)
+
         if info and info.get("urls"):
             bc_url, cdna_url = select_reads(info["urls"])
+
         if bc_url and cdna_url:
+            # Peek BOTH files to find which is barcode (26-28bp) vs cDNA (50-100bp)
+            len1 = peek_read_length(bc_url)
+            len2 = peek_read_length(cdna_url)
+
+            # Find the barcode read (26-28bp for 10x)
+            bc_len = None
+            if len1 and len1 in (24, 26, 27, 28):
+                bc_len = len1
+            elif len2 and len2 in (24, 26, 27, 28):
+                bc_len = len2
+                # Swap URLs if _2 is actually the barcode
+                bc_url, cdna_url = cdna_url, bc_url
+
+            if bc_len:
+                chem, _ = classify_chemistry(bc_len, cdna_len=len2 if bc_len == len1 else len1)
+                detected_chem = chem if chem else ""
+
             by_suffix = dict(zip(info["urls"], info["md5"])) if info["md5"] else {}
             rows.append({
                 "sample": srr_to_gsm.get(srr, srr),
@@ -183,10 +206,11 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
                 "fastq_2_url": cdna_url,
                 "fastq_1_md5": by_suffix.get(bc_url, ""),
                 "fastq_2_md5": by_suffix.get(cdna_url, ""),
+                "chemistry": detected_chem,
             })
         else:
             # Not in ENA, or ENA has no usable barcode+cDNA pair (single file)
-            # -> SRA fallback. No URLs/md5; the run is fetched by SRR.
+            # -> SRA fallback. No URLs/md5; chemistry detected after download.
             rows.append({
                 "sample": srr_to_gsm.get(srr, srr),
                 "srr": srr,
@@ -195,6 +219,7 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
                 "fastq_2_url": "",
                 "fastq_1_md5": "",
                 "fastq_2_md5": "",
+                "chemistry": "",  # detected after download
             })
     return rows
 

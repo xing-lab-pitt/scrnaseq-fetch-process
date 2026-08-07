@@ -25,6 +25,34 @@ guard, launch, hang diagnosis, post-run verification).
 `config/`, `run_slurm.sh` — the parent of this `skill/` folder). All commands
 below run from there.
 
+> **THIS MACHINE (xing lab cluster) — local activation note.**
+> Actual runs use the established working directory, which already has a
+> filled-in `config/config.yaml`, the prebuilt human index, and prior `results/`:
+> ```
+> $PIPE = /net/capricorn/home/xing/lul176/skills_agent/fetch_process_snakemake
+> ```
+> The shared clean repo (`.../skills_agent/scrnaseq-fetch-process`) ships
+> `/path/to` placeholders for distribution — do NOT run there. Environment for
+> `run_slurm.sh` on this cluster:
+> ```
+> export SCRNASEQ_VENV=/net/capricorn/home/xing/lul176/mskcc/blood_combined/.venv
+> export SCRNASEQ_EXTRA_PATH=/opt/FastQC:/net/capricorn/home/xing/soh29/libraries/sratoolkit.3.0.2-ubuntu64/bin
+> ```
+> STAR 2.7.10a + samtools are already in `/usr/bin`.
+>
+> Reference + whitelists on this cluster:
+> ```
+> STAR index (human): /net/capricorn/home/xing/lul176/reference/GRCh38/STAR
+> 10x whitelists:     /net/capricorn/home/xing/lul176/reference/10x_whitelists/
+>   3M-february-2018.txt   (v3, current config)
+>   3M-3pgex-may-2023.txt  (v4/GEM-X — same geometry, swap whitelist only)
+> refdata bundles:    /net/capricorn/home/xing/lul176/reference/refdata-gex-{GRCh38,GRCm39}-2024-A.tar.gz
+> To keep a rebuilt index: set reference.star_index to a writable dir (e.g. a
+> sibling STAR_rebuild/); resolve_star_index builds into it once, then reuses it.
+> ```
+> This note is local-only (this copy of the skill is NOT the repo file); keep
+> machine paths out of the repo.
+
 **Environment (site-specific — read the repo's README + `config/config.yaml`):**
 - Python env with `snakemake` + the SLURM executor plugin and the pins in
   `requirements-pipeline.txt`. `run_slurm.sh` activates `$SCRNASEQ_VENV` if set;
@@ -46,7 +74,7 @@ Never edit outside `$PIPE`. All fixes here stay in `$PIPE` (mainly `profiles/slu
 ## Phase 1 — Build the sample sheet from an accession
 
 `prepare_runs.py` resolves any accession type and writes `config/samples.tsv`
-(one row per run: `sample srr source fastq_1_url fastq_2_url fastq_1_md5 fastq_2_md5`).
+(one row per run: `sample srr source fastq_1_url fastq_2_url fastq_1_md5 fastq_2_md5 chemistry`).
 
 ```bash
 cd "$PIPE"
@@ -65,11 +93,21 @@ Accession scoping (handled automatically):
 - **`sra`** — not in ENA, or ENA only mirrors the single cDNA file (barcode read
   submitted as "technical") → prefetch + `fasterq-dump --include-technical`.
 
-### Chemistry guard (runs automatically before writing)
-`prepare_runs.py` peeks the barcode read (HTTP range request, no full download) and:
-- 28 bp → 10x 3′ **v3** (16 CB + 12 UMI) — matches current `config/config.yaml`.
-- 26 bp → 10x 3′ **v2** (16 CB + 10 UMI) — **warns**; switch config to v2 first
-  (`umi_len: 10`, 737K-august-2016 whitelist) or matrices are near-empty.
+### Auto-chemistry detection (runs automatically, per-sample)
+`prepare_runs.py` peeks BOTH reads via HTTP range request and finds which is the
+barcode (26-28bp) vs cDNA (50-100bp). For each ENA sample:
+- 28 bp barcode → **v3** (or v4/GEM-X — same geometry) — writes `chemistry: v3`
+- 26 bp barcode → **v2** — writes `chemistry: v2`
+- No 26-28bp read found → likely not 10x droplet (bulk/Smart-seq) — **refuses** to write sheet
+- SRA-only runs → `chemistry: ""` (empty; detected after download, not yet implemented)
+
+The Snakefile reads the `chemistry` column and dynamically selects whitelist + umi_len
+per sample. Mixed-chemistry datasets (v2 + v3 samples in one study) work automatically.
+Falls back to `config["chemistry"]` for empty or unrecognized chemistry values.
+
+**Chemistry guard (pre-write check, can be skipped with `--no-chem-check`):**
+- Refuses symmetric-mate data (both reads ~same length → not 10x droplet)
+- Warns if detected chemistry mismatches config's expected chemistry (e.g. v2 data but config set for v3)
 - symmetric equal-length mates (e.g. 101/101, 151/151) → **refuses, exit 1, no sheet
   written**: this is bulk / full-length / Smart-seq, not droplet. Use a different
   pipeline (plain STAR alignReads + featureCounts), not this one.
