@@ -79,17 +79,25 @@ chemistry:
   # "Reads Mapped to Gene" (wrong strand collapses it; the QC gate catches it).
   strand: Forward
 
+# Counted feature (per-run toggle): Gene = exonic counts (standard scRNA-seq);
+# GeneFull = full gene body incl. introns (single-nucleus / snRNA-seq — nuclear
+# RNA is mostly unspliced pre-mRNA). The starsolo rule emits `--soloFeatures
+# {feature} Velocyto`, so the Velocyto spliced/unspliced/ambiguous layers are
+# produced in both modes. Set GeneFull for single-nucleus data; leave Gene otherwise.
+feature: Gene
+
 # --outSAMtype None (default): skip the alignment BAM to avoid large disk + I/O.
-# Nothing in the core count pipeline consumes it — QC, to_h5ad (Gene counts +
-# spliced/unspliced/ambiguous), merge, and MultiQC all read Solo.out matrices only;
-# STARsolo computes the Velocyto layers internally, not from a BAM.
+# Nothing in the core count pipeline consumes it — QC, to_h5ad (Gene/GeneFull
+# counts + spliced/unspliced/ambiguous), merge, and MultiQC all read Solo.out
+# matrices only; STARsolo computes the Velocyto layers internally, not from a BAM.
 # If a downstream task needs read-level data (IGV, samtools, external velocyto/
 # RNA-velocity, re-quantification), set "BAM SortedByCoordinate" to emit a
 # coordinate-sorted BAM (Aligned.sortedByCoord.out.bam); coordinate sorting can
 # need extra RAM, so add "--limitBAMsortRAM <bytes>" if STAR reports a sort OOM.
+# NOTE: --soloFeatures is set by the starsolo rule (from `feature` above), so it
+# must NOT appear here — otherwise STARsolo would receive it twice.
 starsolo_extra: >-
   --soloType CB_UMI_Simple
-  --soloFeatures Gene Velocyto
   --readFilesCommand zcat
   --outSAMtype None
 

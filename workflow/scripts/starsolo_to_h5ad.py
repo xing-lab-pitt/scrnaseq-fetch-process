@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Convert STARsolo output (Gene + Velocyto features) into a single .h5ad.
+"""Convert STARsolo output (Gene or GeneFull + Velocyto features) into a single .h5ad.
 
 Layout produced:
-    adata.X                 = Gene counts        (cells x genes, raw counts)
+    adata.X                 = Gene/GeneFull counts (cells x genes, raw counts)
     adata.layers['spliced']   } aligned to X's
     adata.layers['unspliced'] } cells and genes, from the
     adata.layers['ambiguous'] } Velocyto feature
@@ -76,11 +76,15 @@ def reindex(M, src_rows, src_cols, tgt_rows, tgt_cols):
     return sp.csr_matrix(M[row_idx][:, col_idx])
 
 
-def build_matrices(solo_dir, use_filtered=True):
-    """Assemble Gene counts + aligned Velocyto layers. No anndata dependency."""
+def build_matrices(solo_dir, use_filtered=True, feature="Gene"):
+    """Assemble Gene/GeneFull counts + aligned Velocyto layers. No anndata dependency.
+
+    feature selects which STARsolo count matrix becomes X: "Gene" (exonic, scRNA)
+    or "GeneFull" (intron-inclusive, snRNA). Velocyto layers are aligned onto it.
+    """
     solo = Path(solo_dir)
     sub = "filtered" if use_filtered else "raw"
-    barcodes, gene_ids, gene_names, X = load_matrix(solo / "Gene" / sub, "matrix.mtx")
+    barcodes, gene_ids, gene_names, X = load_matrix(solo / feature / sub, "matrix.mtx")
 
     layers = {}
     velo = solo / "Velocyto" / sub
@@ -111,13 +115,15 @@ def main():
     ap.add_argument("-o", "--output", required=True, help="Output .h5ad path")
     ap.add_argument("-s", "--sample", required=True, help="Sample name -> obs['sample']")
     ap.add_argument("--raw", action="store_true", help="Use raw/ instead of filtered/")
+    ap.add_argument("--feature", default="Gene", choices=["Gene", "GeneFull"],
+                    help="STARsolo count feature for X: Gene (scRNA) or GeneFull (snRNA)")
     args = ap.parse_args()
 
     import anndata as ad          # imported here so tests can skip it
     import pandas as pd
 
     barcodes, gene_ids, gene_names, X, layers = build_matrices(
-        args.solo_dir, use_filtered=not args.raw)
+        args.solo_dir, use_filtered=not args.raw, feature=args.feature)
 
     var = pd.DataFrame({"gene_ids": gene_ids, "feature_types": "Gene Expression"},
                        index=_make_unique(gene_names))

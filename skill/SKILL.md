@@ -131,6 +131,21 @@ How to decide the value:
 
 Flags: `--chem v2` (config is set for v2, adjust the warn threshold), `--no-chem-check` (skip the guard).
 
+### Feature: Gene (scRNA) vs GeneFull (snRNA) — config toggle
+`config/config.yaml` key **`feature`** selects the STARsolo count feature for one run:
+- **`Gene`** (default) — exonic counts, correct for standard **scRNA-seq** (single-cell).
+- **`GeneFull`** — counts over the **full gene body incl. introns**, required for
+  **single-nucleus (snRNA-seq)**: nuclear RNA is largely unspliced pre-mRNA, so exon-only
+  counting throws away most single-nucleus signal.
+
+Set `feature: GeneFull` for single-nucleus datasets; leave `Gene` otherwise. The `starsolo`
+rule emits `--soloFeatures {feature} Velocyto`, so the spliced/unspliced/ambiguous layers are
+produced in **both** modes, and STARsolo writes matrices under `Solo.out/<feature>/`. The QC
+gate reads the matching "Reads Mapped to Gene**Full**" column automatically (no extra config).
+This is a per-run toggle; it is **not** auto-detectable — decide it from the assay (single-cell
+vs single-nucleus / nuclei prep) in the GEO/SRA record. Design precedent: Arc Institute's
+scRecounter uses `GeneFull` throughout for exactly this reason.
+
 **Multiple / custom sample lists:** either run `prepare_runs.py` per accession and
 concatenate the TSVs (one header), or hand-write rows. Back up any existing sheet
 first (`cp config/samples.tsv config/samples.<tag>.bak.tsv`).
@@ -220,7 +235,7 @@ operational (stale locks) — none argue for abandoning Snakemake.
 ## Key files in `$PIPE`
 - `workflow/scripts/prepare_runs.py` — accession → sample sheet + chemistry guard.
 - `workflow/scripts/ncbi_utils.py` — GEO/SRA metadata + ENA URL resolution (vendored).
-- `workflow/scripts/starsolo_to_h5ad.py` — STARsolo Gene + Velocyto feature → single .h5ad.
+- `workflow/scripts/starsolo_to_h5ad.py` — STARsolo Gene/GeneFull + Velocyto feature → single .h5ad (`--feature Gene|GeneFull`).
 
 > **"Velocyto" here = STARsolo's `--soloFeatures Velocyto` mode, NOT the separate
 > velocyto.py tool.** STARsolo itself classifies each read as spliced / unspliced /
@@ -230,5 +245,5 @@ operational (stale locks) — none argue for abandoning Snakemake.
 > standard `Gene/` matrix as `adata.X`.
 - `workflow/Snakefile` — rules; `download_fastq` branches on `source`.
 - `profiles/slurm/config.yaml` — SLURM profile + per-rule resources + sacct/squeue fix.
-- `config/config.yaml` — chemistry (umi_len, whitelist), reference paths.
+- `config/config.yaml` — chemistry (umi_len, whitelist), `feature` (Gene/GeneFull), reference paths.
 - `run_slurm.sh` — controller launcher (venv + PATH + `snakemake --profile`).

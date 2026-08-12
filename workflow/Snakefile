@@ -3,7 +3,7 @@
 #   preflight version check
 #   FASTQ download  ->  FastQC
 #   STAR index (once)
-#   STARsolo (Gene + Velocyto, per sample)
+#   STARsolo (Gene OR GeneFull + Velocyto, per sample; feature is config-selectable)
 #   deterministic QC gate (fixed thresholds)  ->  MultiQC report
 #   count matrix -> per-sample .h5ad (spliced/unspliced layers) -> merged .h5ad
 #   optional: existing scanpy pipeline (run_pipeline.py)
@@ -56,6 +56,15 @@ CHEM_PARAMS = {
 
 CH = config["chemistry"]  # fallback/default
 QCC = config["qc"]
+
+# Counted feature (config-selectable toggle, per run):
+#   Gene     = exonic counts (standard scRNA-seq) — default, back-compat.
+#   GeneFull = full gene body incl. introns (single-nucleus / snRNA-seq).
+# STARsolo writes each feature under Solo.out/<FEATURE>/, so this name flows into
+# the starsolo command, the QC Summary.csv path, and starsolo_to_h5ad. Velocyto
+# layers are emitted in both modes.
+FEATURE = config.get("feature", "Gene")
+assert FEATURE in ("Gene", "GeneFull"), f"config 'feature' must be Gene or GeneFull, got {FEATURE!r}"
 
 def get_sample_chemistry(sample):
     """Get chemistry params for a sample, auto-detected or from config."""
@@ -239,6 +248,9 @@ rule starsolo:
         # Forward = 10x 3' (default), Reverse = 10x 5'. Per-sample, so it lives
         # here (not in the shared starsolo_extra, which must NOT also set it).
         strand=lambda wc: get_sample_chemistry(wc.sample)["strand"],
+        # Gene (scRNA) or GeneFull (snRNA), per-run config toggle. Injected here
+        # (not in the shared starsolo_extra) so --soloFeatures is set exactly once.
+        feature=FEATURE,
         extra=config["starsolo_extra"],
     conda: "../envs/tools.yaml"
     # Standard 10x two-file layout: barcode+UMI and cDNA are SEPARATE fastqs
@@ -264,6 +276,7 @@ rule starsolo:
              --soloCBstart {params.cb_start} --soloCBlen {params.cb_len} \
              --soloUMIstart {params.umi_start} --soloUMIlen {params.umi_len} \
              --soloStrand {params.strand} \
+             --soloFeatures {params.feature} Velocyto \
              --outFileNamePrefix {params.prefix} \
              {params.extra}
         """
@@ -276,7 +289,7 @@ rule qc_report:
         report=QC / "qc_gate.tsv",
         passlist=QC / "qc_pass.txt",
     params:
-        entries=lambda wc: [f"{s}={ALIGN}/{s}/Solo.out/Gene/Summary.csv" for s in SAMPLES],
+        entries=lambda wc: [f"{s}={ALIGN}/{s}/Solo.out/{FEATURE}/Summary.csv" for s in SAMPLES],
         vb=QCC["min_valid_barcodes"],
         rm=QCC["min_reads_mapped_gene"],
         ec=QCC["min_estimated_cells"],
@@ -319,9 +332,10 @@ rule to_h5ad:
         H5AD / "{sample}.h5ad",
     params:
         script=f"{SCRIPTS}/starsolo_to_h5ad.py",
+        feature=FEATURE,
     conda: "../envs/scanpy.yaml"
     shell:
-        "python {params.script} {input.solo} -o {output} -s {wildcards.sample}"
+        "python {params.script} {input.solo} -o {output} -s {wildcards.sample} --feature {params.feature}"
 
 rule merge:
     input:
