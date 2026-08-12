@@ -69,11 +69,12 @@ def peek_read_length(url, n_reads=2000, n_bytes=1_000_000):
     return Counter(seqs).most_common(1)[0][0]
 
 
-# v3 and v4 (GEM-X) share identical barcode geometry: 16 bp CB + 12 bp UMI = 28 bp
-# barcode read. ONLY the whitelist differs (v3: 3M-february-2018; v4/GEM-X:
-# 3M-3pgex-may-2023), so read length alone CANNOT distinguish them — the classifier
-# reports "v3" for 28 bp and the guard treats the two as geometry-equivalent.
-SAME_GEOMETRY = {"v3", "v4"}
+# v3, v4 (GEM-X) and arc (Multiome) all share identical barcode geometry: 16 bp CB
+# + 12 bp UMI = 28 bp barcode read. ONLY the whitelist differs (v3: 3M-february-2018;
+# v4/GEM-X: 3M-3pgex-may-2023; arc: 737K-arc-v1), so read length alone CANNOT
+# distinguish them — the classifier reports "v3" for 28 bp and the guard treats all
+# three as geometry-equivalent. arc is never auto-detected from length: pass --multiome.
+SAME_GEOMETRY = {"v3", "v4", "arc"}
 
 
 def classify_chemistry(bc_len, cdna_len=None):
@@ -86,7 +87,7 @@ def classify_chemistry(bc_len, cdna_len=None):
         droplet (bulk / full-length / Smart-seq) -> chem None, refusal message.
     """
     if bc_len in (28, 27):        # some v3 exports trim by 1
-        return "v3", (f"barcode read {bc_len} bp -> 10x 3' v3 or v4/GEM-X "
+        return "v3", (f"barcode read {bc_len} bp -> 10x 3' v3, v4/GEM-X, or arc/Multiome "
                       "(16 CB + 12 UMI; whitelist distinguishes them)")
     if bc_len in (26, 24):        # v2: 16 CB + 10 UMI (some trimmed)
         return "v2", f"barcode read {bc_len} bp -> 10x 3' v2 (16 CB + 10 UMI)"
@@ -135,7 +136,7 @@ def resolve_ena_study(accession, runs_meta):
     return accession
 
 
-def build_rows(accession, srr_to_gsm, runs_meta=None):
+def build_rows(accession, srr_to_gsm, runs_meta=None, chem_override=""):
     """Build sample-sheet rows for EVERY run, preferring ENA URLs.
 
     Each row gets a `source` column:
@@ -146,6 +147,11 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
 
     Each row also gets a `chemistry` column (v2/v3) based on barcode read length,
     or empty string if undetectable (SRA-only; verified after download).
+
+    `chem_override` (e.g. "arc" from --multiome) forces the chemistry on EVERY row,
+    bypassing the length-based call. Use it for chemistries that are geometrically
+    indistinguishable from v3/v4 (arc/Multiome is 28 bp) and so cannot be detected
+    from read length — the caller asserts the whole dataset is that chemistry.
 
     Each row gets a `strand` column, defaulting to "Forward" (10x 3' GEX).
     This is NOT auto-detected — barcode geometry cannot distinguish 3' from 5' —
@@ -179,7 +185,9 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
     for srr in all_srr:
         info = ena.get(srr)
         bc_url = cdna_url = None
-        detected_chem = ""  # empty for SRA (detected after download)
+        # --multiome forces every run to `arc`; otherwise start empty (ENA rows get
+        # filled from the peek below; SRA rows stay empty, detected after download).
+        detected_chem = chem_override
 
         if info and info.get("urls"):
             bc_url, cdna_url = select_reads(info["urls"])
@@ -198,7 +206,7 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
                 # Swap URLs if _2 is actually the barcode
                 bc_url, cdna_url = cdna_url, bc_url
 
-            if bc_len:
+            if bc_len and not chem_override:
                 chem, _ = classify_chemistry(bc_len, cdna_len=len2 if bc_len == len1 else len1)
                 detected_chem = chem if chem else ""
 
@@ -225,7 +233,7 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
                 "fastq_2_url": "",
                 "fastq_1_md5": "",
                 "fastq_2_md5": "",
-                "chemistry": "",  # detected after download
+                "chemistry": chem_override,  # "arc" if --multiome, else "" (detected after download)
                 "strand": "Forward",   # 10x 3' default; set Reverse for 10x 5' GEX
             })
     return rows
@@ -262,9 +270,10 @@ def check_chemistry(rows, expected="v3"):
     # says "v3". Don't warn when the user declared v4; just remind them the
     # whitelist is what makes it v4, since we can't verify that from read length.
     if {chem, expected} <= SAME_GEOMETRY and chem != expected:
-        print(f"  NOTE: read length can't tell v3 from v4 (both 28 bp). You declared "
+        print(f"  NOTE: read length can't tell v3/v4/arc apart (all 28 bp). You declared "
               f"{expected}; make sure config.yaml points at the {expected} whitelist "
-              "(v4/GEM-X: 3M-3pgex-may-2023.txt; v3: 3M-february-2018.txt).")
+              "(v3: 3M-february-2018.txt; v4/GEM-X: 3M-3pgex-may-2023.txt; "
+              "arc/Multiome: 737K-arc-v1.txt).")
     elif chem != expected:
         print(f"  WARNING: detected {chem} but config.yaml is set for {expected}. "
               f"Update config chemistry (v2: umi_len 10, 737K-august-2016 "
@@ -279,13 +288,26 @@ def main():
     ap.add_argument("--tools-dir", default=None,
                     help="Optional dir to prepend to sys.path for ncbi_utils. "
                          "Not needed when ncbi_utils.py sits next to this script.")
-    ap.add_argument("--chem", default="v3", choices=["v2", "v3", "v4"],
+    ap.add_argument("--chem", default="v3", choices=["v2", "v3", "v4", "arc"],
                     help="Chemistry the config is set for; guard warns on mismatch. "
-                         "v3 and v4 (GEM-X) share geometry — v4 only changes the "
-                         "whitelist (3M-3pgex-may-2023.txt).")
+                         "v3, v4 (GEM-X) and arc (Multiome) share geometry — they "
+                         "differ only by whitelist (v4: 3M-3pgex-may-2023.txt; "
+                         "arc: 737K-arc-v1.txt).")
+    ap.add_argument("--multiome", action="store_true",
+                    help="Mark EVERY run as 10x Multiome (Chromium ARC) GEX: writes "
+                         "chemistry=arc into the sheet (STARsolo then uses the "
+                         "737K-arc-v1 whitelist). Multiome GEX is 28 bp, IDENTICAL to "
+                         "v3/v4 by read length, so it cannot be auto-detected — this "
+                         "flag is how you assert it. Pair with feature: GeneFull in "
+                         "config/config.yaml for single-nucleus (snRNA) counting.")
     ap.add_argument("--no-chem-check", action="store_true",
                     help="Skip the pre-write chemistry guard (peek + refuse).")
     args = ap.parse_args()
+
+    # --multiome forces chemistry=arc on all rows and aligns the guard's expected
+    # chemistry, so the geometry NOTE (not a spurious mismatch WARNING) fires.
+    chem_override = "arc" if args.multiome else ""
+    guard_expected = "arc" if args.multiome else args.chem
 
     # ncbi_utils.py is vendored alongside this script, so its directory is
     # already importable. --tools-dir is an optional override for an external copy.
@@ -304,14 +326,14 @@ def main():
         if run.get("srr"):
             srr_to_gsm[run["srr"]] = run.get("gsm") or run["srr"]
 
-    rows = build_rows(args.accession, srr_to_gsm, runs_meta)
+    rows = build_rows(args.accession, srr_to_gsm, runs_meta, chem_override=chem_override)
     if not rows:
         sys.exit(f"No runs resolved for {args.accession}")
 
     # Chemistry guard: peek the barcode read and refuse non-10x data before we
     # write a sheet the STARsolo pipeline can't process. Skip with --no-chem-check.
     if not args.no_chem_check:
-        check_chemistry(rows, expected=args.chem)
+        check_chemistry(rows, expected=guard_expected)
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -327,6 +349,11 @@ def main():
     if n_sra:
         print(f"  NOTE: {n_sra} run(s) not mirrored on ENA -> fetched from SRA "
               "(prefetch + fasterq-dump). Requires sra_tools_bin on PATH.")
+    if args.multiome:
+        print("  chemistry: forced to `arc` (10x Multiome / Chromium ARC GEX) on all "
+              "rows -> STARsolo uses the 737K-arc-v1 whitelist. REMEMBER to set "
+              "`feature: GeneFull` in config/config.yaml for single-nucleus (snRNA) "
+              "counting (nuclear RNA is mostly unspliced pre-mRNA).")
 
 
 if __name__ == "__main__":

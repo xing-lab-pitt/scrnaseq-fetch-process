@@ -47,11 +47,15 @@ SAMPLE_RUNS = samples.groupby("sample")["srr"].apply(list).to_dict()
 SAMPLES = sorted(SAMPLE_RUNS)
 ALL_SRR = list(samples["srr"])
 
-# Chemistry: map v2/v3/v4 to actual parameters
+# Chemistry: map v2/v3/v4/arc to actual parameters (whitelist + UMI length).
+# arc = 10x Multiome (Chromium ARC) GEX: 28bp R1 (16 CB + 12 UMI), so it is
+# indistinguishable from v3/v4 by read length and is NOT auto-detected — set it
+# by hand in the samples.tsv `chemistry` column for single-nucleus Multiome data.
 CHEM_PARAMS = {
     "v2": {"umi_len": 10, "whitelist_suffix": "737K-august-2016.txt"},
     "v3": {"umi_len": 12, "whitelist_suffix": "3M-february-2018.txt"},
     "v4": {"umi_len": 12, "whitelist_suffix": "3M-3pgex-may-2023.txt"},
+    "arc": {"umi_len": 12, "whitelist_suffix": "737K-arc-v1.txt"},
 }
 
 CH = config["chemistry"]  # fallback/default

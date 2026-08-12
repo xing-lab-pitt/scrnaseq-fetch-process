@@ -44,8 +44,10 @@ below run from there.
 > ```
 > STAR index (human): /net/capricorn/home/xing/lul176/reference/GRCh38/STAR
 > 10x whitelists:     /net/capricorn/home/xing/lul176/reference/10x_whitelists/
->   3M-february-2018.txt   (v3, current config)
+>   737K-august-2016.txt   (v2, current config — 26bp R1)
+>   3M-february-2018.txt   (v3 — 28bp R1)
 >   3M-3pgex-may-2023.txt  (v4/GEM-X — same geometry, swap whitelist only)
+>   737K-arc-v1.txt        (10x Multiome/ARC GEX — snRNA; set chemistry: arc)
 > refdata bundles:    /net/capricorn/home/xing/lul176/reference/refdata-gex-{GRCh38,GRCm39}-2024-A.tar.gz
 > To keep a rebuilt index: set reference.star_index to a writable dir (e.g. a
 > sibling STAR_rebuild/); resolve_star_index builds into it once, then reuses it.
@@ -102,8 +104,30 @@ barcode (26-28bp) vs cDNA (50-100bp). For each ENA sample:
 - SRA-only runs → `chemistry: ""` (empty; detected after download, not yet implemented)
 
 The Snakefile reads the `chemistry` column and dynamically selects whitelist + umi_len
-per sample. Mixed-chemistry datasets (v2 + v3 samples in one study) work automatically.
-Falls back to `config["chemistry"]` for empty or unrecognized chemistry values.
+per sample (`CHEM_PARAMS` maps `v2`/`v3`/`v4`/`arc` → whitelist + UMI length). Mixed-chemistry
+datasets (v2 + v3 samples in one study) work automatically. Falls back to `config["chemistry"]`
+for empty or unrecognized chemistry values.
+
+**10x Multiome (ARC) / single-nucleus — pass `--multiome`.** Multiome GEX has the SAME 28bp
+geometry as v3/v4 (16 CB + 12 UMI), so it is **not** auto-detectable — the length detector would
+call it `v3`. For a Multiome dataset, run `prepare_runs.py <ACC> --multiome`: this stamps
+`chemistry: arc` on **every** row (STARsolo then uses whitelist `737K-arc-v1.txt`, from
+cellranger-arc) instead of hand-editing the column. Then set **`feature: GeneFull`** in
+`config/config.yaml` (intronic reads dominate nuclei — `prepare_runs.py` prints this reminder).
+If a Multiome run were left at `v3`, its valid-barcode fraction would collapse (wrong whitelist)
+and the QC gate would fail it.
+
+> **Why chemistry, not "snRNA", is the detectable thing.** `--multiome`/`feature: GeneFull` are
+> two orthogonal decisions and NEITHER is detectable from raw-read *length*:
+> - **feature (cells vs nuclei → Gene vs GeneFull)** is a library-prep fact, invisible in the
+>   FASTQ — it only shows up *after* alignment as a high intronic fraction (GeneFull ≫ Gene
+>   counts). So it stays a manual call from the GEO/SRA record ("single-nucleus"/"snRNA"/"nuclei").
+> - **chemistry (arc vs v3 vs v4)** *is* recoverable from reads, but by matching barcode
+>   **sequences** to each candidate whitelist (the right list matches ~all observed CBs, the
+>   wrong ones ~none) — NOT from the 28bp length, which is identical across all three. This is
+>   how Arc's scRecounter picks a whitelist (empirical parameter scan). The current detector only
+>   peeks length, so arc needs the `--multiome` assertion; a sequence-matching auto-detector is a
+>   possible future add.
 
 ### Strand (3′ vs 5′) — set explicitly, NOT auto-detected
 `--soloStrand` must be `Forward` for 10x **3′** GEX and `Reverse` for 10x **5′** GEX.

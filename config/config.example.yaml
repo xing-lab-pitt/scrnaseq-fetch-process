@@ -59,10 +59,15 @@ reference:
 #   v4/GEM-X -> SAME geometry as v3 (umi_len 12); ONLY swap the whitelist to
 #               3M-3pgex-may-2023.txt. (v3 and v4 can't be told apart by read
 #               length — the whitelist is what selects the chemistry.)
+#   arc      -> 10x Multiome (Chromium ARC) GEX; SAME 28bp geometry as v3
+#               (umi_len 12), whitelist 737K-arc-v1.txt. Common for single-nucleus
+#               (snRNA) — pair with feature: GeneFull. NOT auto-detectable (looks
+#               like v3/v4 by read length); set chemistry: arc by hand in samples.tsv.
 # Whitelists ship with Cell Ranger (lib/python/cellranger/barcodes/), or:
-#   v2: 737K-august-2016.txt (26bp barcode: 16 CB + 10 UMI)
-#   v3: 3M-february-2018.txt (28bp barcode: 16 CB + 12 UMI)
-#   v4: 3M-3pgex-may-2023.txt (28bp barcode: 16 CB + 12 UMI)
+#   v2:  737K-august-2016.txt (26bp barcode: 16 CB + 10 UMI)
+#   v3:  3M-february-2018.txt (28bp barcode: 16 CB + 12 UMI)
+#   v4:  3M-3pgex-may-2023.txt (28bp barcode: 16 CB + 12 UMI)
+#   arc: 737K-arc-v1.txt       (28bp barcode: 16 CB + 12 UMI; from cellranger-arc)
 # NOTE: barcode+UMI and cDNA are separate FASTQs for all 10x 3' chemistries, so
 # the starsolo rule uses the standard two-file form (cDNA first, barcode second)
 # and does NOT use --soloBarcodeMate/--clip5pNbases (no barcode_mate/clip5p keys).
