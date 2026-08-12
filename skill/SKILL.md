@@ -74,7 +74,7 @@ Never edit outside `$PIPE`. All fixes here stay in `$PIPE` (mainly `profiles/slu
 ## Phase 1 — Build the sample sheet from an accession
 
 `prepare_runs.py` resolves any accession type and writes `config/samples.tsv`
-(one row per run: `sample srr source fastq_1_url fastq_2_url fastq_1_md5 fastq_2_md5 chemistry`).
+(one row per run: `sample srr source fastq_1_url fastq_2_url fastq_1_md5 fastq_2_md5 chemistry strand`).
 
 ```bash
 cd "$PIPE"
@@ -104,6 +104,22 @@ barcode (26-28bp) vs cDNA (50-100bp). For each ENA sample:
 The Snakefile reads the `chemistry` column and dynamically selects whitelist + umi_len
 per sample. Mixed-chemistry datasets (v2 + v3 samples in one study) work automatically.
 Falls back to `config["chemistry"]` for empty or unrecognized chemistry values.
+
+### Strand (3′ vs 5′) — set explicitly, NOT auto-detected
+`--soloStrand` must be `Forward` for 10x **3′** GEX and `Reverse` for 10x **5′** GEX.
+This is **not** auto-detected: barcode/UMI geometry is identical for 3′ and 5′, so read
+length cannot tell them apart. `prepare_runs.py` writes `strand: Forward` in every row;
+**flip the rows that are 5′ to `Reverse` by hand** (or set `chemistry.strand: Reverse`
+in config for an all-5′ study). The Snakefile reads the per-sample `strand` column and
+falls back to `config["chemistry"]["strand"]` (default `Forward`) when it is blank.
+
+How to decide the value:
+- **Metadata**: check the GEO/SRA record — "Chromium … 5′", "5′ GEX", "5 prime", "VDJ 5′"
+  → `Reverse`; "3′" or unstated → `Forward`.
+- **Empirical (definitive)**: after a run, read `star/<sample>/Solo.out/Gene/Summary.csv`
+  → "Reads Mapped to Gene: Unique+Multiple Gene". Correct strand ≈ 0.5–0.7; a wrong
+  strand collapses it well below 0.1. The QC gate (`qc.min_reads_mapped_gene`) already
+  fails a wrong-strand run, so a mistake is caught rather than silently shipped.
 
 **Chemistry guard (pre-write check, can be skipped with `--no-chem-check`):**
 - Refuses symmetric-mate data (both reads ~same length → not 10x droplet)

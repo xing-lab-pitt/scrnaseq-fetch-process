@@ -15,7 +15,7 @@ tools_dir: "/path/to/downstream/scripts"
 requirements_txt: "requirements-pipeline.txt"   # checked at preflight (repo-relative is fine)
 
 # Sample sheet from workflow/scripts/prepare_runs.py (or hand-written).
-# Columns: sample  srr  source  fastq_1_url  fastq_2_url  fastq_1_md5  fastq_2_md5
+# Columns: sample  srr  source  fastq_1_url  fastq_2_url  fastq_1_md5  fastq_2_md5  chemistry  strand
 samples_tsv: "config/samples.tsv"
 
 # sra-tools bin dir, used ONLY for runs whose `source` is "sra" (not mirrored on
@@ -72,6 +72,12 @@ chemistry:
   cb_len: 16
   umi_start: 17
   umi_len: 12   # v2: 10, v3/v4: 12
+  # --soloStrand: distinguishes 10x 3' vs 5' (read length / whitelist CANNOT).
+  # Forward = 10x 3' GEX (default); set Reverse for 10x 5' GEX. Overridable
+  # per-sample via the `strand` column in samples.tsv. If unsure: check the
+  # GEO/SRA record for "5'"/"3'", then confirm on Solo.out/Gene/Summary.csv
+  # "Reads Mapped to Gene" (wrong strand collapses it; the QC gate catches it).
+  strand: Forward
 
 # --outSAMtype None (default): skip the alignment BAM to avoid large disk + I/O.
 # Nothing in the core count pipeline consumes it — QC, to_h5ad (Gene counts +

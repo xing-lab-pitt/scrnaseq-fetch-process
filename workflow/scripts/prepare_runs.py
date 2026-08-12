@@ -4,7 +4,7 @@
 Reuses the project's ncbi_utils for metadata + ENA URL resolution, then writes a
 TSV with one row per sequencing run:
 
-    sample  srr  source  fastq_1_url  fastq_2_url  fastq_1_md5  fastq_2_md5
+    sample  srr  source  fastq_1_url  fastq_2_url  fastq_1_md5  fastq_2_md5  chemistry  strand
 
 `source` is "ena" when ENA mirrors pre-split FASTQs (downloaded via curl) or
 "sra" when the run is only in SRA (downloaded via prefetch + fasterq-dump).
@@ -147,6 +147,11 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
     Each row also gets a `chemistry` column (v2/v3) based on barcode read length,
     or empty string if undetectable (SRA-only; verified after download).
 
+    Each row gets a `strand` column, defaulting to "Forward" (10x 3' GEX).
+    This is NOT auto-detected — barcode geometry cannot distinguish 3' from 5' —
+    so set it to "Reverse" by hand for 10x 5' GEX datasets (see the Snakefile /
+    config note on --soloStrand).
+
     The full SRR list comes from NCBI runinfo (srr_to_gsm), so runs missing
     from ENA still appear in the sheet instead of being silently dropped.
     """
@@ -207,6 +212,7 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
                 "fastq_1_md5": by_suffix.get(bc_url, ""),
                 "fastq_2_md5": by_suffix.get(cdna_url, ""),
                 "chemistry": detected_chem,
+                "strand": "Forward",   # 10x 3' default; set Reverse for 10x 5' GEX
             })
         else:
             # Not in ENA, or ENA has no usable barcode+cDNA pair (single file)
@@ -220,6 +226,7 @@ def build_rows(accession, srr_to_gsm, runs_meta=None):
                 "fastq_1_md5": "",
                 "fastq_2_md5": "",
                 "chemistry": "",  # detected after download
+                "strand": "Forward",   # 10x 3' default; set Reverse for 10x 5' GEX
             })
     return rows
 

@@ -37,6 +37,10 @@ if "source" not in samples.columns:
 # Default to the config's static chemistry setting.
 if "chemistry" not in samples.columns:
     samples["chemistry"] = ""
+# Back-compat: sheets written before the strand column have none; empty means
+# "inherit config chemistry.strand" (which defaults to Forward / 10x 3').
+if "strand" not in samples.columns:
+    samples["strand"] = ""
 
 RUN = samples.set_index("srr")
 SAMPLE_RUNS = samples.groupby("sample")["srr"].apply(list).to_dict()
@@ -58,6 +62,10 @@ def get_sample_chemistry(sample):
     # Get first SRR for this sample
     srrs = SAMPLE_RUNS[sample]
     detected = RUN.loc[srrs[0], "chemistry"] if srrs else ""
+    # soloStrand is NOT auto-detected: barcode geometry cannot tell 10x 3' from
+    # 5' apart. Per-sample `strand` column overrides the config default, which
+    # itself defaults to Forward (10x 3'); set Reverse for 10x 5' GEX.
+    strand = (RUN.loc[srrs[0], "strand"] if srrs else "") or CH.get("strand", "Forward")
 
     if detected and detected in CHEM_PARAMS:
         # Use auto-detected chemistry
@@ -68,10 +76,13 @@ def get_sample_chemistry(sample):
         params["cb_start"] = CH["cb_start"]
         params["cb_len"] = CH["cb_len"]
         params["umi_start"] = CH["umi_start"]
+        params["strand"] = strand
         return params
     else:
         # Fall back to config (static chemistry)
-        return CH
+        params = dict(CH)
+        params["strand"] = strand
+        return params
 
 wildcard_constraints:
     srr=r"[A-Za-z0-9]+",
@@ -225,20 +236,24 @@ rule starsolo:
         cb_len=lambda wc: get_sample_chemistry(wc.sample)["cb_len"],
         umi_start=lambda wc: get_sample_chemistry(wc.sample)["umi_start"],
         umi_len=lambda wc: get_sample_chemistry(wc.sample)["umi_len"],
+        # Forward = 10x 3' (default), Reverse = 10x 5'. Per-sample, so it lives
+        # here (not in the shared starsolo_extra, which must NOT also set it).
+        strand=lambda wc: get_sample_chemistry(wc.sample)["strand"],
         extra=config["starsolo_extra"],
     conda: "../envs/tools.yaml"
+    # Standard 10x two-file layout: barcode+UMI and cDNA are SEPARATE fastqs
+    # (v2 R1=26bp, v3/v4 R1=28bp; R2=cDNA). STARsolo expects the cDNA read
+    # FIRST and the CB+UMI read SECOND; the CB/UMI coords below index into
+    # that 2nd read. Do NOT add --soloBarcodeMate/--clip5pNbases here — that
+    # mode is for chemistries where the barcode is EMBEDDED in a read that
+    # also carries cDNA, and it force-clips the barcode read down to 0bp of
+    # cDNA (e.g. clip "26 0" on a 26bp R1 leaves nothing to align), which
+    # collapses gene assignment. Verified on a 10x v2 library: this standard
+    # form -> 64% reads mapped to gene; the soloBarcodeMate form -> 3.4%.
+    # STAR reads MULTIPLE FASTQs simultaneously.
+    # NOTE: comments must stay ABOVE `shell:` — Snakemake's parser requires the
+    # command string to immediately follow the `shell:` keyword.
     shell:
-        # Standard 10x two-file layout: barcode+UMI and cDNA are SEPARATE fastqs
-        # (v2 R1=26bp, v3/v4 R1=28bp; R2=cDNA). STARsolo expects the cDNA read
-        # FIRST and the CB+UMI read SECOND; the CB/UMI coords below index into
-        # that 2nd read. Do NOT add --soloBarcodeMate/--clip5pNbases here — that
-        # mode is for chemistries where the barcode is EMBEDDED in a read that
-        # also carries cDNA, and it force-clips the barcode read down to 0bp of
-        # cDNA (e.g. clip "26 0" on a 26bp R1 leaves nothing to align), which
-        # collapses gene assignment. Verified on a 10x v2 library: this standard
-        # form -> 64% reads mapped to gene; the soloBarcodeMate form -> 3.4%.
-
-        # STAR reads MULTIPLE FASTQs simultaneously
         r"""
         mkdir -p {params.prefix}
         STAR --runMode alignReads \
@@ -248,6 +263,7 @@ rule starsolo:
              --soloCBwhitelist {input.whitelist} \
              --soloCBstart {params.cb_start} --soloCBlen {params.cb_len} \
              --soloUMIstart {params.umi_start} --soloUMIlen {params.umi_len} \
+             --soloStrand {params.strand} \
              --outFileNamePrefix {params.prefix} \
              {params.extra}
         """
