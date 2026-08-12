@@ -73,11 +73,19 @@ chemistry:
   umi_start: 17
   umi_len: 12   # v2: 10, v3/v4: 12
 
+# --outSAMtype None (default): skip the alignment BAM to avoid large disk + I/O.
+# Nothing in the core count pipeline consumes it — QC, to_h5ad (Gene counts +
+# spliced/unspliced/ambiguous), merge, and MultiQC all read Solo.out matrices only;
+# STARsolo computes the Velocyto layers internally, not from a BAM.
+# If a downstream task needs read-level data (IGV, samtools, external velocyto/
+# RNA-velocity, re-quantification), set "BAM SortedByCoordinate" to emit a
+# coordinate-sorted BAM (Aligned.sortedByCoord.out.bam); coordinate sorting can
+# need extra RAM, so add "--limitBAMsortRAM <bytes>" if STAR reports a sort OOM.
 starsolo_extra: >-
   --soloType CB_UMI_Simple
   --soloFeatures Gene Velocyto
   --readFilesCommand zcat
-  --outSAMtype BAM Unsorted
+  --outSAMtype None
 
 # Deterministic QC gate on STARsolo Gene/Summary.csv. Thresholds live HERE
 # (version-controlled), not chosen at runtime, so pass/fail is reproducible.
