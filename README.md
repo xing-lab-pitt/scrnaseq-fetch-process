@@ -20,6 +20,10 @@ accession ──prepare_runs.py──> samples.tsv
 Output per sample: an `.h5ad` with the standard Gene count matrix as `adata.X`
 and `spliced` / `unspliced` / `ambiguous` layers (from STARsolo's `Velocyto`
 feature — this is STARsolo itself, **not** the separate velocyto.py tool).
+`adata.X` is STARsolo's **`Gene`** feature (exonic UMI counts — or **`GeneFull`**,
+intron-inclusive, when `feature: GeneFull`), the matrix you normalize and cluster on.
+`Gene` and `Velocyto` are independent counting modes, so `X` is **not** spliced,
+unspliced, or their sum — the layers sit alongside it for RNA velocity.
 
 ## Features
 
