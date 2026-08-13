@@ -263,6 +263,61 @@ data run with a v3 config) — go back to Phase 1 and fix `config/config.yaml`.
 The resulting `.h5ad` (Gene matrix in `X`, velocyto layers) is ready for
 downstream scanpy analysis (QC, clustering, UMAP, DE).
 
+## Phase 5 — Batch completeness & the agent loop (many studies)
+
+Snakemake calls a sample done as soon as its `.h5ad` merely *exists*. For a real
+"is every dataset finished?" check across many studies, use `reconcile.py` +
+`run_batch.sh`. This layer only ever hands re-runnable work back to Snakemake — it
+never downloads or aligns itself.
+
+**"Done" contract** — a sample is done iff **all three**: `<workdir>/h5ad/<sample>.h5ad`
+exists, `<sample>` is in `<workdir>/qc/qc_pass.txt`, and that h5ad has layers
+`spliced`/`unspliced`/`ambiguous`. Everything else gets a **category** + **action**:
+
+| category | action | why |
+|---|---|---|
+| `missing` | **rerun** | not produced yet — hand back to Snakemake |
+| `corrupt` | **rerun** | unreadable/truncated h5ad — quarantined first, then regenerated |
+| `read_qc_fail` | **flag** | raw reads failed read-QC — re-aligning the same reads can't help |
+| `qc_fail` | **flag** | failed the alignment gate — reason in `qc/qc_gate.tsv` |
+| `no_layers` | **flag** | QC passed but a velocity layer is absent (silent mis-wire) |
+
+**Auto-rerun ONLY the transient categories (`missing`/`corrupt`); always flag the
+rest for the human** — never auto-retry a genuine failure.
+
+```bash
+# activate an env with h5py + pyyaml (snakemake's is fine)
+# One workdir (read-only; launches nothing). exit 0 = done, 1 = work remains, 2 = error.
+python workflow/scripts/reconcile.py --samples config/samples.tsv \
+       --workdir "$PIPE"/results/<ACC> --accession <ACC> --feature Gene \
+       --report qc_reconcile.tsv --ledger results/successful_samples.tsv
+
+# Every study in the manifest (copy config/manifest.example.tsv -> manifest.tsv first):
+python workflow/scripts/reconcile.py --manifest config/manifest.tsv --base-dir "$PIPE" \
+       --json recon.json --ledger results/successful_samples.tsv
+
+# ONE batch cycle (reconcile -> record logbook -> rerun missing + quarantine/rerun
+# corrupt -> flag the rest). NOT a daemon; call it repeatedly. DRY_RUN=1 previews.
+SCRNASEQ_PY=$(command -v python) ./run_batch.sh          # add DRY_RUN=1 (no sbatch)
+```
+
+**Two human gates** (the loop is thin between them):
+- **Gate 1 (before the loop):** approve `config/manifest.tsv`, and make sure each
+  study has a sample sheet — `prepare_runs.py` (Phase 1) is a human step because of
+  the chemistry guard, so the loop never guesses chemistry. A study with no sheet is
+  flagged "samples sheet not found", not run.
+- **Loop:** call `run_batch.sh` repeatedly while it exits 1 **and** launched something
+  this cycle. A study's `missing`/`corrupt` samples are relaunched at most
+  `MAX_RETRIES` (default 2, tracked in `.batch_state.json`), then escalated.
+- **Gate 2 (after):** review the `--report` TSV + `qc_gate.tsv` + `read_qc.tsv` and
+  decide on flagged studies (fix chemistry & re-prepare, accept, or drop). Successful
+  samples are already recorded in the logbook.
+
+**The logbook** — `results/successful_samples.tsv` is the durable, append-only,
+idempotent record of what mapped: one row per done `(accession, sample)` with its
+metrics, chemistry, feature, SRRs, and read-QC status. Check it to answer "what
+finished?" without re-scanning the trees.
+
 ## Troubleshooting (all fixes stay inside `$PIPE`)
 
 | Symptom | Cause | Fix |
@@ -298,7 +353,12 @@ operational (stale locks) — none argue for abandoning Snakemake.
 > `Solo.out/Velocyto/`. No separate velocyto tool runs. `starsolo_to_h5ad.py` loads
 > those into `adata.layers['spliced'/'unspliced'/'ambiguous']`, alongside the
 > standard `Gene/` matrix as `adata.X`.
-- `workflow/Snakefile` — rules; `download_fastq` branches on `source`.
-- `profiles/slurm/config.yaml` — SLURM profile + per-rule resources + sacct/squeue fix.
-- `config/config.yaml` — chemistry (umi_len, whitelist), `feature` (Gene/GeneFull), reference paths.
+- `workflow/scripts/read_qc.py` — role-aware raw-read QC from FastQC (rule `read_qc`); writes `qc/read_qc.tsv`.
+- `workflow/scripts/reconcile.py` — completeness checker (done-contract, categories/actions); single-workdir or `--manifest`.
+- `workflow/Snakefile` — rules; `download_fastq` branches on `source`; `read_qc` reporting rule.
+- `profiles/slurm/config.yaml` — SLURM profile + per-rule resources + sacct/squeue fix + `keep-going`/`retries`.
+- `config/config.yaml` — chemistry (umi_len, whitelist), `feature` (Gene/GeneFull), `read_qc` thresholds, reference paths.
+- `config/manifest.tsv` — one row per study for the batch loop (copy from `manifest.example.tsv`).
 - `run_slurm.sh` — controller launcher (venv + PATH + `snakemake --profile`).
+- `run_batch.sh` — batch agent loop (reconcile → rerun/flag); `snakemake_status.sh` watches jobs.
+- `results/successful_samples.tsv` — the success logbook (append-only record of what mapped).

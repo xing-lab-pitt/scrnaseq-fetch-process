@@ -251,18 +251,118 @@ fraction, and the QC gate fails it.
   share the same barcode geometry); set it from the GEO/SRA record. A wrong call
   collapses the "reads mapped to gene" fraction, which the QC gate catches.
 
+## Batch completeness & the agent loop
+
+Snakemake calls a sample done as soon as its `.h5ad` merely *exists*. A thin
+operational layer on top — `reconcile.py` + `run_batch.sh` — enforces the fuller
+contract, records what actually mapped, and drives reruns across many studies. It
+keeps **mechanics in scripts and judgment with the human**; nothing here downloads
+or aligns — it only ever hands re-runnable work back to Snakemake.
+
+**"Done" contract.** A sample is *done* iff **all three** hold: its
+`<workdir>/h5ad/<sample>.h5ad` exists, `<sample>` is in `<workdir>/qc/qc_pass.txt`
+(passed the alignment QC gate), and that h5ad has layers `spliced`/`unspliced`/
+`ambiguous`. Everything else is categorized, and each category carries an
+**action** — **rerun** (transient, worth an automatic retry) or **flag** (genuine;
+re-running the same inputs gives the same result, so a human decides):
+
+| category       | meaning                                                  | action |
+|----------------|----------------------------------------------------------|--------|
+| `missing`      | no h5ad (not run yet / upstream crash)                   | **rerun** — hand back to Snakemake |
+| `corrupt`      | h5ad exists but unreadable (truncated / killed write)    | **rerun** — quarantined first, then regenerated |
+| `read_qc_fail` | raw reads failed read-QC (bad library / wrong chemistry) | **flag** — same reads re-align to the same failure |
+| `qc_fail`      | h5ad exists but not in `qc_pass.txt` (failed align gate) | **flag** — reason in `qc/qc_gate.tsv` |
+| `no_layers`    | QC passed but a velocity layer is absent                 | **flag** — silent mis-wire in `Solo.out/Velocyto/` |
+
+**Read-QC axis (raw-read quality).** The Snakemake `read_qc` rule (`read_qc.py`)
+parses each run's FastQC output into `qc/read_qc.tsv` + `qc/read_qc_pass.txt`. It is
+**role-aware**: R1 = barcode read (short/repetitive — FastQC content/GC/kmer FAILs
+are *by design*, judged leniently), R2 = cDNA read (judged strictly on read count,
+mean base quality, adapter). Always non-fatal (report layer). If a run genuinely
+fails, the reconciler marks the sample `read_qc_fail` up front — rerunning bad reads
+can't help. If `qc/read_qc.tsv` is absent (older workdir), the axis is simply skipped.
+
+### Files to check
+
+| file | what it tells you |
+|------|-------------------|
+| `results/successful_samples.tsv` | **the success logbook** — one append-only, idempotent row per *done* `(accession, sample)` with its mapping metrics, chemistry, feature, SRRs, read-QC status. The durable record of what mapped. |
+| your `--report` TSV (e.g. `qc_reconcile.tsv`) | every sample's `category` + `action` + reason for the latest reconcile. |
+| `<workdir>/qc/qc_gate.tsv` | alignment metrics + PASS/FAIL reason (valid barcodes, reads-mapped-gene, cells, saturation). |
+| `<workdir>/qc/read_qc.tsv` | per-run raw-read verdict (R1/R2 length, cDNA quality, adapter). |
+| `<workdir>/.quarantine/<stamp>/` | corrupt outputs moved aside (never deleted) so Snakemake regenerates them. |
+| `config/manifest.tsv` | one row per study (`accession  feature  workdir  [samples_tsv]  [notes]`); comment lines allowed. Copy `config/manifest.example.tsv` to start. |
+
+### Use it
+
+```bash
+source "$SCRNASEQ_VENV/bin/activate"    # any env with h5py + pyyaml (snakemake's is fine)
+cp config/manifest.example.tsv config/manifest.tsv   # then edit for your studies
+
+# Check ONE workdir (read-only; launches nothing). exit 0 = done, 1 = work remains, 2 = error.
+python workflow/scripts/reconcile.py --samples config/samples.tsv \
+       --workdir results/GSE123456 --accession GSE123456 --feature Gene \
+       --report qc_reconcile.tsv --ledger results/successful_samples.tsv
+
+# Check EVERY study in the manifest, recording successes to the logbook:
+python workflow/scripts/reconcile.py --manifest config/manifest.tsv --base-dir "$PWD" \
+       --json recon.json --ledger results/successful_samples.tsv
+
+# ONE batch cycle: reconcile -> record ledger -> rerun missing + quarantine/rerun
+# corrupt -> flag the rest. NOT a daemon; call it repeatedly.
+SCRNASEQ_PY=$(command -v python) ./run_batch.sh          # add DRY_RUN=1 to preview (no sbatch)
+PIPE=$PWD ./snakemake_status.sh                          # watch jobs (or: squeue -u $USER)
+```
+
+### The loop (thin, two human gates)
+
+```
+GATE 1 (human) ─ approve config/manifest.tsv; ensure each study has a sample sheet
+                 (prepare_runs.py per accession — chemistry guard wants a human eye)
+      │
+      ▼
+  ┌─ run_batch.sh → reconcile → record ledger → rerun missing + quarantine/rerun
+  │     │            corrupt → flag read_qc_fail / qc_fail / no_layers
+  │     ▼
+  │   watch snakemake_status.sh (or squeue) until controllers are idle
+  └─────┘  repeat while run_batch.sh exits 1 AND it launched something this cycle
+      │
+      ▼
+  stop when: reconciler COMPLETE (exit 0), OR only flagged / retry-capped studies remain
+      │
+      ▼
+GATE 2 (human) ─ review the reconcile report + qc_gate.tsv + read_qc.tsv; decide on
+                 flagged studies (fix chemistry & re-prepare, accept, or drop).
+                 Successful samples are already in the logbook.
+```
+
+- **Why `prepare_runs.py` is Gate 1, not in the loop:** building a sheet does
+  network metadata calls + a chemistry guard that wants human confirmation. The loop
+  only relaunches Snakemake for studies whose sheet already exists — it never guesses
+  chemistry. A study with no sheet shows up flagged with "samples sheet not found".
+- **Retry cap:** a study with `missing`/`corrupt` samples is relaunched at most
+  `MAX_RETRIES` (default 2, counted in `.batch_state.json`), then escalated to the
+  human instead of looping forever.
+- **Tests:** `tests/test_reconcile.py` (every category + action + ledger idempotency)
+  and `tests/test_read_qc.py` (offline role-aware read-QC verdict).
+
 ## Repository layout
 
 ```
 config/
   config.example.yaml     # template — copy to config.yaml and edit
   samples.example.tsv     # sample-sheet schema example
+  manifest.example.tsv    # batch manifest schema — copy to manifest.tsv (agent loop)
 workflow/
   Snakefile               # the DAG
-  scripts/                # prepare_runs, ncbi_utils, starsolo_to_h5ad, qc_gate, ...
+  scripts/                # prepare_runs, ncbi_utils, starsolo_to_h5ad, qc_gate,
+                          #   read_qc, reconcile, ...
   envs/                   # conda env specs (scanpy.yaml, tools.yaml)
+tests/                    # offline unit tests (test_reconcile.py, test_read_qc.py)
 profiles/slurm/           # SLURM profile (edit partitions for your cluster)
 run_slurm.sh              # SLURM launcher (paths from env vars / script location)
+run_batch.sh              # batch agent loop: reconcile -> rerun/flag across studies
+snakemake_status.sh       # watch running SLURM jobs
 requirements-pipeline.txt # Python version pins (enforced at preflight)
 skill/                    # optional Claude Code agent runbook (see below)
 ```

@@ -1,0 +1,19 @@
+# Datasets manifest — one row per study to fetch+process.
+# The reconciler (reconcile.py --manifest) and driver (run_batch.sh) read this.
+# Copy to config/manifest.tsv and edit for your studies.
+#
+# Columns (tab-separated):
+#   accession    GEO/SRA accession (GSE / SRP / PRJNA / SRX / SRR / GSM).
+#   feature      Gene (scRNA, exonic) or GeneFull (snRNA, intron-inclusive).
+#   workdir      Output tree for this study. Relative paths resolve from $PWD
+#                (the repo root); absolute paths are used as-is.
+#   samples_tsv  (optional) sheet to use; blank -> <workdir>/samples.used.tsv,
+#                then config/<accession>.samples.tsv, then config/samples.tsv.
+#   notes        (optional) free text; chemistry/strand ride in the per-sample
+#                sheet (prepare_runs.py --chem …), not here.
+#
+# Lines beginning with # are ignored. Chemistry is auto-detected per sample at
+# sheet-build time, so per-study configs only override workdir/samples_tsv/feature.
+accession	feature	workdir	samples_tsv	notes
+GSE123456	Gene	results/GSE123456		example row — 10x 3' scRNA-seq
+GSE654321	GeneFull	results/GSE654321		example row — single-nucleus (snRNA-seq)

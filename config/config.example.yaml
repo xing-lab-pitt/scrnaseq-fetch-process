@@ -119,3 +119,14 @@ qc:
   min_valid_barcodes: 0.70
   min_reads_mapped_gene: 0.50
   min_estimated_cells: 100
+
+# Raw-read QC (rule read_qc): flags each run's FastQC output. Role-aware — R1 is
+# the barcode read (judged leniently), R2 the cDNA read (judged strictly). Always
+# non-fatal (a report layer); the reconciler + batch loop act on the result.
+# Optional block — omit it and these defaults apply (back-compat).
+read_qc:
+  mode: warn                    # warn = report only (the reconciler acts on it)
+  min_reads: 1000               # min cDNA reads per run below which it's flagged
+  min_mean_quality: 28          # min mean per-base Phred on the cDNA read (R2)
+  max_adapter_fraction: 0.10    # max cumulative adapter fraction on the cDNA read
+  min_barcode_len: 24           # barcode read (R1) shorter than this is flagged

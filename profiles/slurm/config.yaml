@@ -21,6 +21,8 @@ use-conda: false
 printshellcmds: true
 rerun-incomplete: true
 latency-wait: 60               # NFS: wait for outputs to appear after a job ends
+keep-going: true               # one broken sample doesn't stop the others
+retries: 3                     # auto-retry transient (e.g. network) failures, any rule
 
 # Job-status polling. The default is `sacct`, which talks to slurmdbd. When that
 # accounting DB is down ("Connection refused ... :6819"), the executor can't see

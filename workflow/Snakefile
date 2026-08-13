@@ -66,6 +66,10 @@ CHEM_PARAMS = {
 CH = config["chemistry"]  # fallback/default
 QCC = config["qc"]
 
+# Read-QC thresholds (flags each SRR's raw-read quality from FastQC output).
+# Optional block: defaults keep back-compat for configs written before it.
+RQC = config.get("read_qc", {})
+
 # Counted feature (config-selectable toggle, per run):
 #   Gene     = exonic counts (standard scRNA-seq) — default, back-compat.
 #   GeneFull = full gene body incl. introns (single-nucleus / snRNA-seq).
@@ -122,6 +126,7 @@ rule all:
         final_matrix(),
         QC / "multiqc_report.html",
         QC / "qc_ok.txt",
+        QC / "read_qc.tsv",
 
 # ------------------------------ preflight ------------------------------------
 rule check_versions:
@@ -397,3 +402,35 @@ rule downstream:
     conda: "../envs/scanpy.yaml"
     shell:
         "python {params.script} {input.matrix} --output {params.outdir}"
+
+# ------------------------- read-QC flag (reporting) --------------------------
+# Parses every SRR's FastQC output and flags read quality PASS/FAIL against fixed
+# config thresholds (read_qc block). Role-aware: R1 = barcode read (lenient), R2 =
+# cDNA read (strict). NON-FATAL by design — like qc_report, it writes a report and
+# a pass list but never stops the run; the reconciler + batch loop act on it.
+# Defaults keep it working for configs written before the read_qc block existed.
+rule read_qc:
+    input:
+        fastqc=expand(str(QC / "fastqc" / "{srr}_R{read}_fastqc.zip"),
+                      srr=ALL_SRR, read=[1, 2]),
+    output:
+        report=QC / "read_qc.tsv",
+        passlist=QC / "read_qc_pass.txt",
+    params:
+        fastqc_dir=lambda wc: str(QC / "fastqc"),
+        samples=config["samples_tsv"],
+        min_reads=RQC.get("min_reads", 1000),
+        min_mean_quality=RQC.get("min_mean_quality", 28),
+        max_adapter_fraction=RQC.get("max_adapter_fraction", 0.10),
+        min_barcode_len=RQC.get("min_barcode_len", 24),
+        script=f"{SCRIPTS}/read_qc.py",
+    conda: "../envs/scanpy.yaml"
+    shell:
+        "python {params.script} "
+        "--fastqc-dir {params.fastqc_dir} "
+        "--samples {params.samples} "
+        "--report {output.report} --passlist {output.passlist} "
+        "--min-reads {params.min_reads} "
+        "--min-mean-quality {params.min_mean_quality} "
+        "--max-adapter-fraction {params.max_adapter_fraction} "
+        "--min-barcode-len {params.min_barcode_len}"
