@@ -41,6 +41,11 @@ if "chemistry" not in samples.columns:
 # "inherit config chemistry.strand" (which defaults to Forward / 10x 3').
 if "strand" not in samples.columns:
     samples["strand"] = ""
+# Back-compat: sheets written before over-sequenced-R1 support have no
+# `barcode_read_length` column. Empty = standard-length barcode read (STARsolo
+# asserts it equals 28 bp); "0" = over-sequenced R1 -> --soloBarcodeReadLength 0.
+if "barcode_read_length" not in samples.columns:
+    samples["barcode_read_length"] = ""
 
 RUN = samples.set_index("srr")
 SAMPLE_RUNS = samples.groupby("sample")["srr"].apply(list).to_dict()
@@ -79,6 +84,11 @@ def get_sample_chemistry(sample):
     # 5' apart. Per-sample `strand` column overrides the config default, which
     # itself defaults to Forward (10x 3'); set Reverse for 10x 5' GEX.
     strand = (RUN.loc[srrs[0], "strand"] if srrs else "") or CH.get("strand", "Forward")
+    # Over-sequenced barcode read (R1 longer than CB+UMI, e.g. 150 bp read through
+    # into poly-T): "0" disables STARsolo's "barcode read == 28 bp" assertion.
+    # CB/UMI are still parsed from the fixed leading positions; the tail is ignored.
+    bc_read_len = (RUN.loc[srrs[0], "barcode_read_length"] if srrs else "")
+    bc_read_len_flag = "--soloBarcodeReadLength 0" if str(bc_read_len).strip() == "0" else ""
 
     if detected and detected in CHEM_PARAMS:
         # Use auto-detected chemistry
@@ -90,11 +100,13 @@ def get_sample_chemistry(sample):
         params["cb_len"] = CH["cb_len"]
         params["umi_start"] = CH["umi_start"]
         params["strand"] = strand
+        params["bc_read_len_flag"] = bc_read_len_flag
         return params
     else:
         # Fall back to config (static chemistry)
         params = dict(CH)
         params["strand"] = strand
+        params["bc_read_len_flag"] = bc_read_len_flag
         return params
 
 wildcard_constraints:
@@ -252,6 +264,9 @@ rule starsolo:
         # Forward = 10x 3' (default), Reverse = 10x 5'. Per-sample, so it lives
         # here (not in the shared starsolo_extra, which must NOT also set it).
         strand=lambda wc: get_sample_chemistry(wc.sample)["strand"],
+        # "--soloBarcodeReadLength 0" for over-sequenced-R1 runs (>28 bp barcode
+        # read), else "". Per-sample, so it rides here; empty = today's behavior.
+        bc_read_len_flag=lambda wc: get_sample_chemistry(wc.sample)["bc_read_len_flag"],
         # Gene (scRNA) or GeneFull (snRNA), per-run config toggle. Injected here
         # (not in the shared starsolo_extra) so --soloFeatures is set exactly once.
         feature=FEATURE,
@@ -280,6 +295,7 @@ rule starsolo:
              --soloCBstart {params.cb_start} --soloCBlen {params.cb_len} \
              --soloUMIstart {params.umi_start} --soloUMIlen {params.umi_len} \
              --soloStrand {params.strand} \
+             {params.bc_read_len_flag} \
              --soloFeatures {params.feature} Velocyto \
              --outFileNamePrefix {params.prefix} \
              {params.extra}

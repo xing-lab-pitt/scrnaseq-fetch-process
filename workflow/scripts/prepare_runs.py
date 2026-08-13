@@ -4,7 +4,7 @@
 Reuses the project's ncbi_utils for metadata + ENA URL resolution, then writes a
 TSV with one row per sequencing run:
 
-    sample  srr  source  fastq_1_url  fastq_2_url  fastq_1_md5  fastq_2_md5  chemistry  strand
+    sample  srr  source  fastq_1_url  fastq_2_url  fastq_1_md5  fastq_2_md5  chemistry  strand  barcode_read_length  software
 
 `source` is "ena" when ENA mirrors pre-split FASTQs (downloaded via curl) or
 "sra" when the run is only in SRA (downloaded via prefetch + fasterq-dump).
@@ -69,6 +69,151 @@ def peek_read_length(url, n_reads=2000, n_bytes=1_000_000):
     return Counter(seqs).most_common(1)[0][0]
 
 
+# chem -> 10x cell-barcode whitelist filename (same names the Snakefile/config use).
+WHITELIST_SUFFIX = {
+    "v2":  "737K-august-2016.txt",
+    "v3":  "3M-february-2018.txt",
+    "v4":  "3M-3pgex-may-2023.txt",
+    "arc": "737K-arc-v1.txt",
+}
+DEFAULT_WHITELIST_DIR = "/net/capricorn/home/xing/lul176/reference/10x_whitelists"
+
+
+def _fetch_read_seqs(url, n_reads=2000, n_bytes=2_000_000):
+    """Return up to n_reads sequence lines from the head of a gzipped FASTQ, via an
+    HTTP range request (no full download). Empty list on failure."""
+    import gzip, io
+    from urllib.request import Request, urlopen
+    seqs = []
+    try:
+        req = Request(url, headers={"Range": f"bytes=0-{n_bytes}"})
+        with urlopen(req, timeout=60) as r:
+            blob = r.read()
+        gz = gzip.GzipFile(fileobj=io.BytesIO(blob))
+        for i, line in enumerate(gz):
+            if i % 4 == 1:
+                seqs.append(line.rstrip(b"\n").decode("ascii", "replace"))
+            if len(seqs) >= n_reads:
+                break
+    except (EOFError, OSError):
+        pass
+    except Exception:
+        return []
+    return seqs
+
+
+def probe_barcode_chem(read_url, whitelist_dir, cb_len=16, n_reads=2000, min_frac=0.5):
+    """Identify 10x chemistry by matching a read's leading barcode against whitelists.
+
+    For reads too long to classify by length (an over-sequenced R1, e.g. 150 bp on a
+    10x run where the sequencer read through the 28 bp barcode into the poly-T tail),
+    read length alone cannot tell 10x-droplet from Smart-seq/bulk. The decisive test
+    is whether the read's first `cb_len` bp ARE cell barcodes: sample reads, take the
+    leading cb_len bp of each, and match against every candidate whitelist. A real 10x
+    read matches its whitelist at a high fraction (~0.8); random 16-mers match a 737K–
+    3M entry list at ~1e-4. A hit therefore both proves droplet data AND names the
+    chemistry (whichever whitelist the barcodes came from).
+
+    Streams each whitelist file once (O(sample) memory), so the multi-million-line
+    v3/v4 lists are never fully loaded. Returns (chem, frac) for the best match, or
+    (None, best_frac) if no whitelist matches at >= min_frac.
+    """
+    from collections import Counter
+    seqs = _fetch_read_seqs(read_url, n_reads=n_reads)
+    bcs = Counter(s[:cb_len] for s in seqs if len(s) >= cb_len)
+    total = sum(bcs.values())
+    if not total:
+        return None, 0.0
+    best_chem, best_frac = None, 0.0
+    for chem, suffix in WHITELIST_SUFFIX.items():
+        wl = Path(whitelist_dir) / suffix
+        if not wl.exists():
+            continue
+        hits = 0
+        with open(wl) as fh:
+            for line in fh:
+                bc = line.strip()
+                if bc in bcs:
+                    hits += bcs[bc]
+        frac = hits / total
+        if frac > best_frac:
+            best_chem, best_frac = chem, frac
+    if best_frac >= min_frac:
+        return best_chem, best_frac
+    return None, best_frac
+
+
+# GEO serves every sample in machine-readable SOFT text; `!Sample_data_processing`
+# is the submitter's own free-text statement of how the data was made. targ=self
+# keeps the payload to just this GSM (no platform/series dump).
+GEO_SOFT_URL = ("https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?"
+                "acc={acc}&targ=self&form=text&view=quick")
+
+# Ordered (regex, software, chem_hint, is_droplet); FIRST match wins, so the most
+# specific / disambiguating patterns come first: cellranger-arc before plain
+# cellranger, alevin before bulk salmon, bustools before bulk kallisto. `chem_hint`
+# is set only when the software pins a chemistry read length can't (arc is 28 bp,
+# identical to v3/v4 by length — only cellranger-ARC in the record tells them apart).
+# `is_droplet` False marks plate-based / bulk software so the guard can refuse with
+# a precise reason instead of the generic symmetric-mates message.
+_SOFTWARE_RULES = [
+    (r"cell\s*-?\s*ranger[\s-]*arc",                    "cellranger-arc", "arc", True),
+    (r"cell\s*-?\s*ranger",                             "cellranger",     "",    True),
+    (r"star\s*-?\s*solo",                               "starsolo",       "",    True),
+    (r"kallisto[\s|]*bustools|\bkb[-\s]?python\b|\bbustools\b", "kb-python", "", True),
+    (r"salmon[\s|]*alevin|alevin[-\s]?fry|\balevin\b",  "alevin",         "",    True),
+    (r"drop-?seq|dropseqtools",                         "dropseq",        "",    True),
+    (r"smart-?seq",                                     "smartseq",       "",    False),
+    (r"\brsem\b",                                       "rsem",           "",    False),
+    (r"feature\s*counts|\bsubread\b",                   "featurecounts",  "",    False),
+    (r"\bhisat2?\b",                                    "hisat2",         "",    False),
+    (r"\btophat\b",                                     "tophat",         "",    False),
+    (r"\bkallisto\b",                                   "kallisto",       "",    False),
+    (r"\bsalmon\b",                                     "salmon",         "",    False),
+]
+# software token -> is_droplet, so the guard can re-derive the verdict from the
+# `software` column alone (build_rows already resolved it).
+_SOFTWARE_DROPLET = {sw: drop for _, sw, _, drop in _SOFTWARE_RULES}
+
+
+def software_is_droplet(software):
+    """True / False / None (unknown) for a software token from `_SOFTWARE_RULES`."""
+    return _SOFTWARE_DROPLET.get(software, None)
+
+
+def fetch_geo_software(gsm):
+    """Read a GSM's GEO record and classify the processing software the submitter
+    named in the free-text `!Sample_data_processing` field.
+
+    Returns {"software", "chem_hint", "is_droplet", "text"}: a recognized aligner
+    (is_droplet True/False), an empty software with is_droplet None if the field is
+    present but names nothing we know, or None if the record can't be fetched or has
+    no data_processing field at all.
+
+    This is a metadata ASSERT (see the detect-vs-assert principle): the submitter's
+    own statement of how the data was made, reachable even for SRA-only runs the
+    FASTQ range-probe can't peek. cellranger-arc pins `arc` (read length can't tell
+    it from v3/v4); a Smart-seq/RSEM/HISAT2 mention confirms NON-droplet.
+    """
+    import re
+    from urllib.request import urlopen
+    if not gsm or not gsm.upper().startswith("GSM"):
+        return None
+    try:
+        with urlopen(GEO_SOFT_URL.format(acc=gsm), timeout=60) as r:
+            txt = r.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    dp = " ".join(re.findall(r"^!Sample_data_processing\s*=\s*(.*)$", txt, re.M))
+    if not dp.strip():
+        return None
+    low = dp.lower()
+    for rx, sw, chem, drop in _SOFTWARE_RULES:
+        if re.search(rx, low):
+            return {"software": sw, "chem_hint": chem, "is_droplet": drop, "text": dp}
+    return {"software": "", "chem_hint": "", "is_droplet": None, "text": dp}
+
+
 # v3, v4 (GEM-X) and arc (Multiome) all share identical barcode geometry: 16 bp CB
 # + 12 bp UMI = 28 bp barcode read. ONLY the whitelist differs (v3: 3M-february-2018;
 # v4/GEM-X: 3M-3pgex-may-2023; arc: 737K-arc-v1), so read length alone CANNOT
@@ -92,9 +237,9 @@ def classify_chemistry(bc_len, cdna_len=None):
     if bc_len in (26, 24):        # v2: 16 CB + 10 UMI (some trimmed)
         return "v2", f"barcode read {bc_len} bp -> 10x 3' v2 (16 CB + 10 UMI)"
     if cdna_len is not None and bc_len >= cdna_len - 5:
-        return None, (f"both reads ~{bc_len} bp (symmetric mates): this is NOT "
-                      "10x droplet data (looks like bulk / full-length / "
-                      "Smart-seq). STARsolo has no barcode read to parse here.")
+        return None, (f"both reads ~{bc_len} bp (symmetric mates): NOT 10x droplet "
+                      "data — no short (~26-28 bp) barcode read for STARsolo to parse. "
+                      "(bulk, or full-length/plate-based single cell like Smart-seq)")
     return None, (f"barcode read {bc_len} bp: not a recognized 10x length "
                   "(expected 26 for v2 or 28 for v3).")
 
@@ -136,7 +281,8 @@ def resolve_ena_study(accession, runs_meta):
     return accession
 
 
-def build_rows(accession, srr_to_gsm, runs_meta=None, chem_override=""):
+def build_rows(accession, srr_to_gsm, runs_meta=None, chem_override="", whitelist_dir=None,
+               use_geo_software=True):
     """Build sample-sheet rows for EVERY run, preferring ENA URLs.
 
     Each row gets a `source` column:
@@ -148,6 +294,14 @@ def build_rows(accession, srr_to_gsm, runs_meta=None, chem_override=""):
     Each row also gets a `chemistry` column (v2/v3) based on barcode read length,
     or empty string if undetectable (SRA-only; verified after download).
 
+    Each row gets a `barcode_read_length` column: "0" when the barcode read is
+    over-sequenced (longer than the 28 bp CB+UMI, e.g. a 150 bp 10x R1 read through
+    into poly-T), which the Snakefile turns into `--soloBarcodeReadLength 0` so
+    STARsolo skips its "barcode read == 28 bp" assertion (CB/UMI still parsed from
+    the fixed first-28 positions). Empty for standard-length runs. When a long-mate
+    pair can't be classified by length and chemistry isn't overridden, `whitelist_dir`
+    enables probe_barcode_chem to decide 10x (+ which chemistry) vs non-droplet.
+
     `chem_override` (e.g. "arc" from --multiome) forces the chemistry on EVERY row,
     bypassing the length-based call. Use it for chemistries that are geometrically
     indistinguishable from v3/v4 (arc/Multiome is 28 bp) and so cannot be detected
@@ -157,6 +311,13 @@ def build_rows(accession, srr_to_gsm, runs_meta=None, chem_override=""):
     This is NOT auto-detected — barcode geometry cannot distinguish 3' from 5' —
     so set it to "Reverse" by hand for 10x 5' GEX datasets (see the Snakefile /
     config note on --soloStrand).
+
+    Each row gets a `software` column: the processing software named in the run's
+    GEO `!Sample_data_processing` field (cellranger-arc, starsolo, smartseq, ...),
+    fetched once per study when `use_geo_software` is set. It's provenance in the
+    sheet, but also drives detection: cellranger-arc pins `arc` chemistry (which read
+    length can't tell from v3/v4) even for SRA-only runs, and non-droplet software
+    (Smart-seq/RSEM/HISAT2) lets the guard refuse with a precise reason.
 
     The full SRR list comes from NCBI runinfo (srr_to_gsm), so runs missing
     from ENA still appear in the sheet instead of being silently dropped.
@@ -181,6 +342,41 @@ def build_rows(accession, srr_to_gsm, runs_meta=None, chem_override=""):
     else:
         all_srr = sorted(set(srr_to_gsm) | set(ena))
 
+    # The barcode-probe verdict is uniform across a study's runs (same chemistry,
+    # same which-mate-is-R1 orientation), so compute it once on the first long-mate
+    # row and reuse. long_verdict: None (not yet probed) | {"chem":.., "swap":bool}
+    # | {"chem": None} (probed, no whitelist match -> not droplet).
+    long_verdict = None
+
+    def _decide_long_reads(url_a, url_b):
+        """Probe a long-mate pair to identify 10x chemistry and which mate is R1.
+        Returns {"chem", "swap"} on a hit (swap=True means url_b is the barcode read),
+        or {"chem": None} on a miss."""
+        chem_a, frac_a = probe_barcode_chem(url_a, whitelist_dir)
+        if chem_a:
+            return {"chem": chem_a, "swap": False, "frac": frac_a}
+        chem_b, frac_b = probe_barcode_chem(url_b, whitelist_dir)
+        if chem_b:
+            return {"chem": chem_b, "swap": True, "frac": frac_b}
+        return {"chem": None, "frac": max(frac_a, frac_b)}
+
+    # GEO `!Sample_data_processing` names the processing software (cellranger-arc,
+    # STARsolo, Smart-seq, ...). It's study-uniform, so fetch it once from the first
+    # resolvable GSM and reuse: it (a) pins arc — which read length can't tell from
+    # v3/v4 — so it AUTO-detects Multiome without --multiome, (b) fills chemistry for
+    # SRA-only runs the FASTQ probe can't reach, and (c) confirms non-droplet software
+    # so the guard refuses precisely. See fetch_geo_software / detect-vs-assert.
+    sw_verdict = None
+    if use_geo_software:
+        for s in all_srr:
+            if srr_to_gsm.get(s, "").upper().startswith("GSM"):
+                sw_verdict = fetch_geo_software(srr_to_gsm[s])
+                if sw_verdict is not None:
+                    break
+    sw = sw_verdict or {}
+    sw_str = sw.get("software", "")
+    sw_chem = sw.get("chem_hint", "")
+
     rows = []
     for srr in all_srr:
         info = ena.get(srr)
@@ -188,6 +384,8 @@ def build_rows(accession, srr_to_gsm, runs_meta=None, chem_override=""):
         # --multiome forces every run to `arc`; otherwise start empty (ENA rows get
         # filled from the peek below; SRA rows stay empty, detected after download).
         detected_chem = chem_override
+        bc_read_len = ""   # "0" only when the barcode read is over-sequenced (>28 bp)
+        probe_rejected = False   # True if the barcode probe actively ruled out 10x
 
         if info and info.get("urls"):
             bc_url, cdna_url = select_reads(info["urls"])
@@ -206,9 +404,44 @@ def build_rows(accession, srr_to_gsm, runs_meta=None, chem_override=""):
                 # Swap URLs if _2 is actually the barcode
                 bc_url, cdna_url = cdna_url, bc_url
 
-            if bc_len and not chem_override:
-                chem, _ = classify_chemistry(bc_len, cdna_len=len2 if bc_len == len1 else len1)
-                detected_chem = chem if chem else ""
+            if bc_len:
+                # Standard-length barcode read: classify by length as before.
+                if not chem_override:
+                    chem, _ = classify_chemistry(bc_len, cdna_len=len2 if bc_len == len1 else len1)
+                    detected_chem = chem if chem else ""
+            else:
+                # No short barcode read among the mates. Could be an over-sequenced-R1
+                # 10x run (CB/UMI still in the leading 28 bp) or genuine non-droplet
+                # data. The barcode read, whichever it is, is longer than 28 bp -> tell
+                # STARsolo to skip its length assertion.
+                bc_read_len = "0"
+                if chem_override:
+                    # User asserted the chemistry (e.g. --multiome); trust it and keep
+                    # _1 as the barcode read (10x R1 convention).
+                    pass
+                elif whitelist_dir:
+                    if long_verdict is None:
+                        long_verdict = _decide_long_reads(bc_url, cdna_url)
+                    if long_verdict["chem"]:
+                        detected_chem = long_verdict["chem"]
+                        if long_verdict.get("swap"):
+                            bc_url, cdna_url = cdna_url, bc_url
+                    else:
+                        # Probe found no whitelist match -> not 10x droplet. Leave
+                        # chemistry empty so the guard refuses; drop the flag (moot).
+                        # Mark it rejected so a GEO "cellranger-arc" label can't
+                        # resurrect data the sequence probe actively ruled out.
+                        detected_chem = ""
+                        bc_read_len = ""
+                        probe_rejected = True
+
+            # GEO software can name a chemistry read length can't resolve (arc, v3
+            # and v4 are all 28 bp). If the record pins one and our length/probe call
+            # was the ambiguous default (or empty), upgrade to it. A confident v2
+            # (26 bp) is never overridden — v2 isn't in SAME_GEOMETRY — and a probe
+            # that actively rejected the run wins over the metadata label.
+            if sw_chem and not probe_rejected and (not detected_chem or detected_chem in SAME_GEOMETRY):
+                detected_chem = sw_chem
 
             by_suffix = dict(zip(info["urls"], info["md5"])) if info["md5"] else {}
             rows.append({
@@ -221,10 +454,14 @@ def build_rows(accession, srr_to_gsm, runs_meta=None, chem_override=""):
                 "fastq_2_md5": by_suffix.get(cdna_url, ""),
                 "chemistry": detected_chem,
                 "strand": "Forward",   # 10x 3' default; set Reverse for 10x 5' GEX
+                "barcode_read_length": bc_read_len,
+                "software": sw_str,
             })
         else:
             # Not in ENA, or ENA has no usable barcode+cDNA pair (single file)
-            # -> SRA fallback. No URLs/md5; chemistry detected after download.
+            # -> SRA fallback. No URLs/md5, and the FASTQ probe can't reach it. Fill
+            # chemistry from the GEO data_processing software (chem_override wins if
+            # --multiome was passed); else leave empty (verified after download).
             rows.append({
                 "sample": srr_to_gsm.get(srr, srr),
                 "srr": srr,
@@ -233,39 +470,104 @@ def build_rows(accession, srr_to_gsm, runs_meta=None, chem_override=""):
                 "fastq_2_url": "",
                 "fastq_1_md5": "",
                 "fastq_2_md5": "",
-                "chemistry": chem_override,  # "arc" if --multiome, else "" (detected after download)
+                "chemistry": chem_override or sw_chem,
                 "strand": "Forward",   # 10x 3' default; set Reverse for 10x 5' GEX
+                "barcode_read_length": "",   # unknown for SRA-only; verified after download
+                "software": sw_str,
             })
+
+    # Study-uniformity backfill: if any ENA run in this study proved over-sequenced
+    # (barcode_read_length="0"), its SRA-only siblings almost certainly share that
+    # library prep. Propagate "0" to SRA rows whose chemistry we managed to fill, so
+    # STARsolo skips its 28 bp assertion for them too. --soloBarcodeReadLength 0 is a
+    # safe superset (harmless on a genuine 28 bp R1: CB/UMI still parse from the
+    # leading positions), so this can't break a standard-length SRA run.
+    if any(r["source"] == "ena" and r["barcode_read_length"] == "0" for r in rows):
+        for r in rows:
+            if r["source"] == "sra" and r["chemistry"] and not r["barcode_read_length"]:
+                r["barcode_read_length"] = "0"
     return rows
 
 
-def check_chemistry(rows, expected="v3"):
-    """Peek the barcode read of the first ENA run and warn/refuse on a mismatch.
-
-    Only ENA rows can be peeked cheaply (range request on a public URL); SRA-only
-    runs are skipped with a note (their barcode read is verified after download).
-    Returns the detected chemistry ('v2'/'v3') or None. Raises SystemExit if the
-    data is clearly not 10x droplet (symmetric mates).
-    """
-    ena_rows = [r for r in rows if r["source"] == "ena" and r["fastq_1_url"]]
-    if not ena_rows:
-        print("  chemistry: no ENA rows to peek (SRA-only); verify barcode read "
-              "length (~28 bp v3 / ~26 bp v2) after the first download.")
-        return None
-    r = ena_rows[0]
-    bc = peek_read_length(r["fastq_1_url"])
-    cdna = peek_read_length(r["fastq_2_url"]) if r["fastq_2_url"] else None
-    if bc is None:
-        print("  chemistry: could not peek read length (network?); skipping guard.")
-        return None
-    chem, msg = classify_chemistry(bc, cdna)
-    print(f"  chemistry check ({r['srr']}): {msg}")
-    if chem is None:
+def _refuse_not_droplet(msg, single_cell):
+    """Hard-stop: the data isn't 10x droplet, so this STARsolo pipeline can't run it.
+    The message splits bulk from full-length/plate-based single cell (Smart-seq)."""
+    if single_cell:
         sys.exit(
             "REFUSING to write sheet: this pipeline is 10x droplet STARsolo only.\n"
             f"  {msg}\n"
-            "  For bulk / full-length / Smart-seq data use a different pipeline "
-            "(plain STAR alignReads + featureCounts), not this one.")
+            "  SRA marks this as SINGLE CELL, and that's not a contradiction: the "
+            "symmetric mates say it is full-length / plate-based single cell "
+            "(Smart-seq family), NOT 10x droplet. There is no in-read cell barcode "
+            "to demultiplex here — each cell is its own library/file.\n"
+            "  Process it with a full-length single-cell workflow (per-cell STAR "
+            "alignReads + featureCounts), not this droplet pipeline.")
+    sys.exit(
+        "REFUSING to write sheet: this pipeline is 10x droplet STARsolo only.\n"
+        f"  {msg}\n"
+        "  For bulk / full-length / Smart-seq data use a different pipeline "
+        "(plain STAR alignReads + featureCounts), not this one.")
+
+
+def check_chemistry(rows, expected="v3", single_cell=False):
+    """Warn/refuse on the first ENA run based on the chemistry build_rows detected.
+
+    Only ENA rows are resolvable pre-download; SRA-only runs are skipped with a note
+    (their barcode read is verified after download). Returns the detected chemistry
+    ('v2'/'v3'/'v4'/'arc') or None. Raises SystemExit if the data is clearly not 10x
+    droplet — a symmetric/long-mate pair whose leading bases don't match any 10x
+    whitelist (build_rows already ran the barcode probe and left chemistry empty).
+
+    `single_cell` (from SRA LibrarySource == "TRANSCRIPTOMIC SINGLE CELL") sharpens
+    the refusal: symmetric mates that are still single cell are full-length /
+    plate-based (Smart-seq family), NOT bulk — a distinct, but still non-droplet,
+    pipeline. Both SRA's "single cell" label and our "not droplet" verdict are then
+    correct; the message says so rather than implying the data is bulk.
+    """
+    ena_rows = [r for r in rows if r["source"] == "ena" and r["fastq_1_url"]]
+    if not ena_rows:
+        # No ENA row to peek. Fall back to the GEO data_processing software signal,
+        # which reaches SRA-only runs the FASTQ range-probe can't.
+        sw_str = rows[0].get("software", "") if rows else ""
+        chem0 = rows[0].get("chemistry", "") if rows else ""
+        if software_is_droplet(sw_str) is False:
+            _refuse_not_droplet(
+                f"GEO data_processing names non-droplet software ({sw_str}); this "
+                "is not 10x droplet data.", single_cell)
+        if chem0:
+            print(f"  chemistry ({rows[0]['srr']}): SRA-only, set to 10x {chem0} from "
+                  f"GEO data_processing software ({sw_str or 'stated'}).")
+            return chem0
+        print("  chemistry: no ENA rows to peek (SRA-only) and GEO data_processing "
+              "named no known aligner; verify barcode read length (~28 bp v3 / "
+              "~26 bp v2) after the first download.")
+        return None
+    r = ena_rows[0]
+    chem = r.get("chemistry") or ""
+    over_sequenced = r.get("barcode_read_length") == "0"
+
+    if chem:
+        # build_rows already resolved the chemistry (by length, override, or the
+        # barcode-whitelist probe for over-sequenced R1). Report and validate it.
+        if over_sequenced:
+            print(f"  chemistry check ({r['srr']}): 10x {chem} via barcode-whitelist "
+                  "probe — R1 is over-sequenced (>28 bp); will set "
+                  "--soloBarcodeReadLength 0 so STARsolo reads CB/UMI from the "
+                  "leading 28 bp and ignores the tail.")
+        else:
+            print(f"  chemistry check ({r['srr']}): 10x {chem} (barcode read length).")
+    else:
+        # No chemistry resolved. Peek the reads to build an explanatory message, then
+        # refuse: a short unrecognized length, or a long/symmetric pair the barcode
+        # probe already rejected (leading bases aren't 10x whitelist barcodes).
+        bc = peek_read_length(r["fastq_1_url"])
+        cdna = peek_read_length(r["fastq_2_url"]) if r["fastq_2_url"] else None
+        if bc is None:
+            print("  chemistry: could not peek read length (network?); skipping guard.")
+            return None
+        _, msg = classify_chemistry(bc, cdna)
+        print(f"  chemistry check ({r['srr']}): {msg}")
+        _refuse_not_droplet(msg, single_cell)
     # v3 and v4 look identical here (both 28 bp) — the length classifier always
     # says "v3". Don't warn when the user declared v4; just remind them the
     # whitelist is what makes it v4, since we can't verify that from read length.
@@ -302,6 +604,18 @@ def main():
                          "config/config.yaml for single-nucleus (snRNA) counting.")
     ap.add_argument("--no-chem-check", action="store_true",
                     help="Skip the pre-write chemistry guard (peek + refuse).")
+    ap.add_argument("--no-geo-software", action="store_true",
+                    help="Skip the GEO !Sample_data_processing lookup that names the "
+                         "processing software (cellranger-arc, STARsolo, Smart-seq, "
+                         "...). That lookup auto-detects arc/Multiome (which read "
+                         "length can't tell from v3/v4), fills chemistry for SRA-only "
+                         "runs, and sharpens non-droplet refusals. Use for offline "
+                         "runs or to fall back to length/probe detection only.")
+    ap.add_argument("--whitelist-dir", default=DEFAULT_WHITELIST_DIR,
+                    help="Dir of 10x cell-barcode whitelists (737K-arc-v1.txt, "
+                         "3M-february-2018.txt, …). Used to identify chemistry AND "
+                         "confirm droplet data when a run's R1 is over-sequenced "
+                         "(>28 bp) so read length alone can't classify it.")
     args = ap.parse_args()
 
     # --multiome forces chemistry=arc on all rows and aligns the guard's expected
@@ -326,14 +640,21 @@ def main():
         if run.get("srr"):
             srr_to_gsm[run["srr"]] = run.get("gsm") or run["srr"]
 
-    rows = build_rows(args.accession, srr_to_gsm, runs_meta, chem_override=chem_override)
+    rows = build_rows(args.accession, srr_to_gsm, runs_meta, chem_override=chem_override,
+                      whitelist_dir=args.whitelist_dir,
+                      use_geo_software=not args.no_geo_software)
     if not rows:
         sys.exit(f"No runs resolved for {args.accession}")
 
     # Chemistry guard: peek the barcode read and refuse non-10x data before we
     # write a sheet the STARsolo pipeline can't process. Skip with --no-chem-check.
+    # SRA LibrarySource tells us whether a refusal is bulk vs full-length single cell
+    # (Smart-seq) so the guard message doesn't wrongly imply single-cell data is bulk.
     if not args.no_chem_check:
-        check_chemistry(rows, expected=guard_expected)
+        single_cell = any(
+            "SINGLE CELL" in (run.get("library_source") or "").upper()
+            for run in runs_meta)
+        check_chemistry(rows, expected=guard_expected, single_cell=single_cell)
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)

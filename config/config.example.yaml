@@ -15,7 +15,13 @@ tools_dir: "/path/to/downstream/scripts"
 requirements_txt: "requirements-pipeline.txt"   # checked at preflight (repo-relative is fine)
 
 # Sample sheet from workflow/scripts/prepare_runs.py (or hand-written).
-# Columns: sample  srr  source  fastq_1_url  fastq_2_url  fastq_1_md5  fastq_2_md5  chemistry  strand
+# Columns: sample  srr  source  fastq_1_url  fastq_2_url  fastq_1_md5  fastq_2_md5  chemistry  strand  barcode_read_length  software
+#   barcode_read_length: blank = standard (STARsolo asserts R1 == 28 bp); "0" =
+#   over-sequenced R1 (e.g. 150 bp read through into poly-T) -> --soloBarcodeReadLength 0.
+#   software: processing software from the run's GEO !Sample_data_processing field
+#   (cellranger-arc, starsolo, smartseq, ...); provenance only — the Snakefile ignores
+#   it. prepare_runs.py uses it to pin arc chemistry and fill SRA-only chemistry blanks.
+# The trailing columns are optional and back-compatible: sheets without them still work.
 samples_tsv: "config/samples.tsv"
 
 # sra-tools bin dir, used ONLY for runs whose `source` is "sra" (not mirrored on

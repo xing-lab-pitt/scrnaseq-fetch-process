@@ -96,38 +96,63 @@ Accession scoping (handled automatically):
   submitted as "technical") → prefetch + `fasterq-dump --include-technical`.
 
 ### Auto-chemistry detection (runs automatically, per-sample)
-`prepare_runs.py` peeks BOTH reads via HTTP range request and finds which is the
-barcode (26-28bp) vs cDNA (50-100bp). For each ENA sample:
-- 28 bp barcode → **v3** (or v4/GEM-X — same geometry) — writes `chemistry: v3`
+`prepare_runs.py` learns each run's chemistry from remote metadata — no download — using
+**three complementary channels**, and writes the result into the `chemistry` (and, when
+relevant, `barcode_read_length` / `software`) columns of the sheet.
+
+**Channel 1 — barcode-read LENGTH (ENA).** Peeks BOTH reads via HTTP range request and finds
+which is the barcode (26-28bp) vs cDNA (50-100bp):
+- 28 bp barcode → **v3** (or v4/GEM-X / arc — same geometry) — writes `chemistry: v3`
 - 26 bp barcode → **v2** — writes `chemistry: v2`
-- No 26-28bp read found → likely not 10x droplet (bulk/Smart-seq) — **refuses** to write sheet
-- SRA-only runs → `chemistry: ""` (empty; detected after download, not yet implemented)
+- No 26-28bp read among the mates → hand off to Channel 2 (below) before deciding.
 
-The Snakefile reads the `chemistry` column and dynamically selects whitelist + umi_len
-per sample (`CHEM_PARAMS` maps `v2`/`v3`/`v4`/`arc` → whitelist + UMI length). Mixed-chemistry
-datasets (v2 + v3 samples in one study) work automatically. Falls back to `config["chemistry"]`
-for empty or unrecognized chemistry values.
+**Channel 2 — barcode SEQUENCE probe (ENA).** When neither mate is a barcode length (e.g. an
+**over-sequenced R1**: a 150 bp read that ran through the 28 bp barcode into the poly-T tail),
+length alone can't tell 10x from Smart-seq/bulk. `probe_barcode_chem` samples ~2000 reads, takes
+each read's leading 16 bp, and **streams** each candidate whitelist once (O(sample) memory — never
+loads the 3M-line lists) to find the best match fraction. A real 10x read matches its own whitelist
+at ~0.8; random 16-mers match at ~1e-4. So a hit both **proves droplet data** and **names the
+chemistry** (incl. `arc`). On a hit the run gets `barcode_read_length: 0`, which the Snakefile turns
+into `--soloBarcodeReadLength 0` so STARsolo reads CB/UMI from the fixed leading positions and
+ignores the tail. On a miss, `chemistry` stays empty and the guard **refuses** (not 10x droplet).
+The whitelist directory comes from `--whitelist-dir` (default `…/reference/10x_whitelists`).
 
-**10x Multiome (ARC) / single-nucleus — pass `--multiome`.** Multiome GEX has the SAME 28bp
-geometry as v3/v4 (16 CB + 12 UMI), so it is **not** auto-detectable — the length detector would
-call it `v3`. For a Multiome dataset, run `prepare_runs.py <ACC> --multiome`: this stamps
-`chemistry: arc` on **every** row (STARsolo then uses whitelist `737K-arc-v1.txt`, from
-cellranger-arc) instead of hand-editing the column. Then set **`feature: GeneFull`** in
+**Channel 3 — GEO `!Sample_data_processing` software (reaches SRA-only runs).** GEO serves every
+sample as machine-readable SOFT text naming the submitter's own processing software.
+`fetch_geo_software` (run once per study, via the run→GSM map) classifies it — `cellranger-arc`,
+`cellranger`, `starsolo`, `kb-python`, `alevin`, … vs non-droplet `smartseq`/`rsem`/`hisat2`/… —
+and writes it to the `software` column. This is the only channel that reaches **SRA-only runs the
+FASTQ probe can't peek**. It: (a) **auto-detects `arc`** — `cellranger-arc` pins the arc chemistry
+that read length can't tell from v3/v4, so `--multiome` is no longer required for arc studies whose
+record names the software; (b) **fills chemistry for SRA-only rows**; (c) drives a **precise
+non-droplet refusal** (names the Smart-seq/bulk software). Guardrails: it never overrides a
+confident v2 (26 bp), and a Channel-2 probe that *actively rejected* a run wins over a
+"cellranger-arc" label (data beats metadata). Disable with `--no-geo-software` (offline/fallback).
+
+The Snakefile reads the `chemistry` column and dynamically selects whitelist + umi_len per sample
+(`CHEM_PARAMS` maps `v2`/`v3`/`v4`/`arc` → whitelist + UMI length). Mixed-chemistry datasets
+(v2 + v3 samples in one study) work automatically. Falls back to `config["chemistry"]` for empty or
+unrecognized chemistry values. `software` is provenance only — the Snakefile ignores it.
+
+**10x Multiome (ARC) / single-nucleus.** Multiome GEX has the SAME 28bp geometry as v3/v4 (16 CB +
+12 UMI), so it is not distinguishable by **length** — the length detector would call it `v3`. It is
+now resolved to `arc` automatically by Channel 3 (GEO says `cellranger-arc`) or Channel 2 (barcodes
+match `737K-arc-v1.txt`, from cellranger-arc). **`--multiome` remains as an explicit assertion**:
+pass it to stamp `chemistry: arc` on **every** row when the metadata is silent or you want to force
+it, instead of hand-editing the column. Either way, also set **`feature: GeneFull`** in
 `config/config.yaml` (intronic reads dominate nuclei — `prepare_runs.py` prints this reminder).
-If a Multiome run were left at `v3`, its valid-barcode fraction would collapse (wrong whitelist)
-and the QC gate would fail it.
+If a Multiome run were left at `v3`, its valid-barcode fraction would collapse (wrong whitelist) and
+the QC gate would fail it.
 
 > **Why chemistry, not "snRNA", is the detectable thing.** `--multiome`/`feature: GeneFull` are
-> two orthogonal decisions and NEITHER is detectable from raw-read *length*:
-> - **feature (cells vs nuclei → Gene vs GeneFull)** is a library-prep fact, invisible in the
+> two orthogonal decisions:
+> - **feature (cells vs nuclei → Gene vs GeneFull)** is a library-prep fact, invisible in the raw
 >   FASTQ — it only shows up *after* alignment as a high intronic fraction (GeneFull ≫ Gene
 >   counts). So it stays a manual call from the GEO/SRA record ("single-nucleus"/"snRNA"/"nuclei").
-> - **chemistry (arc vs v3 vs v4)** *is* recoverable from reads, but by matching barcode
->   **sequences** to each candidate whitelist (the right list matches ~all observed CBs, the
->   wrong ones ~none) — NOT from the 28bp length, which is identical across all three. This is
->   how Arc's scRecounter picks a whitelist (empirical parameter scan). The current detector only
->   peeks length, so arc needs the `--multiome` assertion; a sequence-matching auto-detector is a
->   possible future add.
+> - **chemistry (arc vs v3 vs v4)** is NOT distinguishable by the 28bp length (identical across all
+>   three), but IS recoverable two ways, both now implemented: from the barcode **sequences**
+>   (Channel 2, matching each candidate whitelist — the same idea as Arc's scRecounter parameter
+>   scan) and from the **stated software** (Channel 3, `cellranger-arc` in the GEO record).
 
 ### Strand (3′ vs 5′) — set explicitly, NOT auto-detected
 `--soloStrand` must be `Forward` for 10x **3′** GEX and `Reverse` for 10x **5′** GEX.
@@ -146,14 +171,20 @@ How to decide the value:
   fails a wrong-strand run, so a mistake is caught rather than silently shipped.
 
 **Chemistry guard (pre-write check, can be skipped with `--no-chem-check`):**
-- Refuses symmetric-mate data (both reads ~same length → not 10x droplet)
-- Warns if detected chemistry mismatches config's expected chemistry (e.g. v2 data but config set for v3)
-- symmetric equal-length mates (e.g. 101/101, 151/151) → **refuses, exit 1, no sheet
-  written**: this is bulk / full-length / Smart-seq, not droplet. Use a different
-  pipeline (plain STAR alignReads + featureCounts), not this one.
-- SRA-only rows can't be peeked cheaply → note printed; verify after first download (Phase 4).
+- Warns if detected chemistry mismatches config's expected chemistry (e.g. v2 data but config set for v3).
+- Symmetric equal-length mates (e.g. 101/101, 151/151) are **NOT auto-refused** — the barcode
+  SEQUENCE probe (Channel 2) runs first. If the leading 16 bp match a 10x whitelist, it's an
+  over-sequenced-R1 10x run and is processed (`barcode_read_length: 0`); only if the probe finds
+  no whitelist match does the guard **refuse, exit 1, no sheet written** (genuine bulk /
+  full-length / Smart-seq → use plain STAR alignReads + featureCounts, not this pipeline). The
+  refusal message is sharpened by SRA `LibrarySource` (bulk vs plate-based single cell).
+- SRA-only rows can't be FASTQ-peeked, but their chemistry is filled from the GEO
+  `data_processing` software (Channel 3): non-droplet software → refuse; `cellranger-arc` → arc.
+  If the record names no known aligner, a note is printed and it's verified after first download.
 
-Flags: `--chem v2` (config is set for v2, adjust the warn threshold), `--no-chem-check` (skip the guard).
+Flags: `--chem v2` (config is set for v2, adjust the warn threshold), `--no-chem-check` (skip the
+guard), `--multiome` (assert `chemistry: arc` on every row), `--no-geo-software` (skip the GEO
+software lookup — offline/fallback), `--whitelist-dir DIR` (10x whitelist dir for the barcode probe).
 
 ### Feature: Gene (scRNA) vs GeneFull (snRNA) — config toggle
 `config/config.yaml` key **`feature`** selects the STARsolo count feature for one run:
