@@ -30,10 +30,25 @@ feature — this is STARsolo itself, **not** the separate velocyto.py tool).
   md5-checked FASTQs over HTTPS (`curl`); falls back to NCBI `prefetch` +
   `fasterq-dump --include-technical` for runs ENA hasn't mirrored. Chosen
   automatically per run (the `source` column); no global switch.
-- **Chemistry guard** — before writing the sheet, peeks the barcode read length
-  and refuses non-10x-droplet data (bulk / Smart-seq), warns on a v2/v3 mismatch.
+- **Automatic chemistry detection (v2 / v3 / v4 / arc)** — `prepare_runs.py` learns
+  each run's 10x chemistry from remote metadata, no download, via three channels:
+  barcode-read **length** (ENA peek), a barcode-**sequence** whitelist probe (rescues
+  over-sequenced R1), and the **processing software** named in the run's GEO
+  `data_processing` record (reaches SRA-only runs). It writes the result per run and
+  refuses genuinely non-10x-droplet data (bulk / Smart-seq) with a precise reason.
+- **10x Multiome (ARC) / single-nucleus** — the `arc` chemistry is supported and
+  auto-detected (or asserted with `--multiome`); pair with `feature: GeneFull` for
+  nuclei. Over-sequenced barcode reads (e.g. a 150 bp R1) are handled automatically
+  via `--soloBarcodeReadLength 0`.
+- **Per-run toggles** — chemistry, strand (3′/5′), feature (Gene/GeneFull), and the
+  over-sequenced-R1 flag are all per-sample sheet columns, so mixed studies (e.g. v2 +
+  v3 samples) process correctly in a single run.
 - **Deterministic QC gate** — pass/fail thresholds live in `config.yaml`
   (version-controlled), applied to STARsolo's `Summary.csv`.
+- **STAR index resolver** — the index is a pipeline output: `resolve_star_index`
+  probes what your STAR speaks (`genomeVersion`) and symlinks a compatible supplied
+  index or rebuilds from FASTA+GTF, so an index/aligner version mismatch is impossible
+  by construction.
 - **SLURM-ready** — each rule is submitted as a right-sized job; the included
   profile is resilient to a down `slurmdbd` (polls `squeue`, not `sacct`).
 
@@ -81,6 +96,12 @@ these via `--use-conda` (env specs in `workflow/envs/`).
   - **v4 / GEM-X**: `3M-3pgex-may-2023.txt`
     ([download](https://teichlab.github.io/scg_lib_structs/data/10X-Genomics/3M-3pgex-may-2023.txt.gz))
   - v2: `737K-august-2016.txt`
+  - **arc (10x Multiome GEX)**: `737K-arc-v1.txt` — ships with Cell Ranger ARC /
+    Cell Ranger (`lib/python/cellranger/barcodes/`); not in the raw refdata bundles.
+
+  Put all the whitelists you might need in one directory; `prepare_runs.py` reads it
+  (`--whitelist-dir`, default `…/reference/10x_whitelists`) for the sequence probe,
+  and the Snakefile picks the one matching each sample's detected chemistry.
 
 ## Setup
 
@@ -112,7 +133,8 @@ paths never get committed.
 ```bash
 # 1. Resolve an accession to a sample sheet (network step, run once).
 python workflow/scripts/prepare_runs.py GSE123456 -o config/samples.tsv
-#    SRX/SRR/GSM/SRP/PRJNA also work. Add --chem v2 if your config is v2.
+#    SRX/SRR/GSM/SRP/PRJNA also work. Chemistry is auto-detected; add --chem v2 if
+#    your config is v2, or --multiome for 10x Multiome / single-nucleus data.
 
 # 2. Dry-run, then submit on SLURM (controller runs as a small job; each rule
 #    becomes its own job).
@@ -143,26 +165,87 @@ Then verify: barcode read ~28 bp (v3) —
 
 ## Chemistry
 
-Defaults are 10x Chromium 3′ **v3**. Supported 3′ chemistries:
+Defaults are 10x Chromium 3′ **v3**. Supported chemistries:
 
 | Chemistry | Barcode read | CB / UMI | `umi_len` | Whitelist |
 |---|---|---|---|---|
 | v2 | 26 bp | 16 / 10 | `10` | `737K-august-2016.txt` |
 | **v3** / v3.1 (default) | 28 bp | 16 / 12 | `12` | `3M-february-2018.txt` |
 | **v4** / GEM-X | 28 bp | 16 / 12 | `12` | `3M-3pgex-may-2023.txt` |
+| **arc** (Multiome GEX) | 28 bp | 16 / 12 | `12` | `737K-arc-v1.txt` |
 
 The barcode+UMI read and the cDNA read are separate FASTQs, so STARsolo runs in
 the standard two-file mode — the barcode read is never clipped, and there is no
 `clip5p`/`barcode_mate` setting to tune.
 
-**v3 vs v4:** identical read geometry — the *only* difference is the whitelist. To
-run v4 data, keep the v3 geometry and just point `chemistry.whitelist` at
-`3M-3pgex-may-2023.txt`. Because read length can't distinguish them, the chemistry
-guard reports both as "v3"; pass `--chem v4` to `prepare_runs.py` and it prints a
-reminder to confirm the whitelist rather than a false mismatch warning.
+### Automatic detection (three channels)
 
+`prepare_runs.py` fills the `chemistry` column from remote metadata (no download),
+and the Snakefile maps it to the right whitelist + `umi_len` per sample — so
+**mixed-chemistry studies process in one run**. It falls back to `config.yaml`'s
+static `chemistry` for any row it leaves empty.
+
+1. **Barcode-read length (ENA)** — peeks both reads via HTTP range request: 26 bp
+   barcode → v2, 28 bp → v3/v4/arc.
+2. **Barcode-sequence probe (ENA)** — when no mate is a barcode length (e.g. an
+   **over-sequenced R1**: a 150 bp read that ran through the 28 bp barcode into the
+   poly-T tail), length alone can't tell 10x from bulk/Smart-seq. The probe samples
+   ~2000 reads and matches their leading 16 bp against each whitelist (streamed, so
+   the multi-million-line lists are never fully loaded). A hit both proves droplet
+   data and names the chemistry, and flags the run `barcode_read_length=0` →
+   `--soloBarcodeReadLength 0` (STARsolo reads CB/UMI from the leading positions and
+   ignores the tail). A miss → refuse.
+3. **GEO `data_processing` software** — the processing software the submitter named
+   in the run's GEO record (`cellranger-arc`, `starsolo`, … vs non-droplet
+   `smartseq`/`rsem`/`hisat2`/…), read once per study. This is the only channel that
+   reaches **SRA-only runs** the FASTQ probe can't peek: it auto-detects `arc`, fills
+   SRA-only chemistry, and drives a precise non-droplet refusal that names the software.
+
+Guardrails: a confident v2 (26 bp) is never overridden; a sequence probe that
+*actively rejects* a run beats a `cellranger-arc` metadata label (data > metadata).
 Wrong chemistry (or the wrong whitelist for the right geometry) silently yields
-near-empty matrices — the QC gate's `min_valid_barcodes` catches this.
+near-empty matrices — the QC gate's `min_valid_barcodes` catches it.
+
+### v3 vs v4
+
+Identical read geometry — the *only* difference is the whitelist. To run v4 data,
+keep the v3 geometry and just point `chemistry.whitelist` at `3M-3pgex-may-2023.txt`.
+Because read length can't distinguish them, detection reports both as "v3"; pass
+`--chem v4` to `prepare_runs.py` and it prints a reminder to confirm the whitelist
+rather than a false mismatch warning.
+
+### 10x Multiome (ARC) / single-nucleus
+
+Multiome GEX has the same 28 bp geometry as v3/v4, so it can't be told apart by
+**length** — but it is resolved to `arc` automatically when the GEO record names
+`cellranger-arc` (channel 3) or the barcode-sequence probe matches `737K-arc-v1.txt`
+(channel 2). You can also assert it explicitly with `prepare_runs.py <ACC>
+--multiome` (stamps `chemistry: arc` on every row). For nuclei, also set
+**`feature: GeneFull`** in `config.yaml` — `prepare_runs.py` prints this reminder.
+Leaving Multiome data at `v3` uses the wrong whitelist, collapses the valid-barcode
+fraction, and the QC gate fails it.
+
+### `prepare_runs.py` chemistry flags
+
+| Flag | Effect |
+|---|---|
+| `--multiome` | Assert `chemistry: arc` on every row (10x Multiome / single-nucleus). |
+| `--chem {v2,v3,v4,arc}` | Expected chemistry for the guard's warn threshold. |
+| `--no-chem-check` | Skip the pre-write chemistry guard entirely. |
+| `--no-geo-software` | Skip the GEO `data_processing` lookup (offline / fallback to length+probe). |
+| `--whitelist-dir DIR` | Directory of 10x whitelists used by the sequence probe. |
+
+## Feature & strand (per-run settings)
+
+- **`feature`** (`config.yaml`) — `Gene` = exonic counts (standard **scRNA-seq**,
+  default); `GeneFull` = full gene body incl. introns (**single-nucleus / snRNA-seq**,
+  where unspliced nuclear RNA dominates). Both modes still emit the Velocyto
+  spliced/unspliced/ambiguous layers. Not detectable from raw reads (it only shows as
+  a high intronic fraction after alignment), so it's a manual call from the record.
+- **`strand`** (per-sample sheet column, or `chemistry.strand` default) — `Forward`
+  for 10x **3′** GEX, `Reverse` for 10x **5′** GEX. Not auto-detectable (3′ and 5′
+  share the same barcode geometry); set it from the GEO/SRA record. A wrong call
+  collapses the "reads mapped to gene" fraction, which the QC gate catches.
 
 ## Repository layout
 
