@@ -163,9 +163,64 @@ sbatch run_slurm.sh \
   results/qc/fastqc/<SRR>_R2_fastqc.zip
 ```
 
-Then verify: barcode read ~28 bp (v3) —
-`zcat results/fastq/<SRR>_R1.fastq.gz | head -2` — and the `.h5ad` has
-`spliced`/`unspliced`/`ambiguous` layers.
+Then verify with the two inspection scripts (see
+[Quality checks](#quality-checks-read-only)):
+
+```bash
+python workflow/scripts/inspect_qc.py    <WORKDIR> --config config/config.yaml
+python workflow/scripts/check_layers.py  <WORKDIR>
+```
+
+Both must look right before you spend the rest of the study — a bad chemistry call or a
+missing `Gene` feature costs a full re-alignment of every sample to correct.
+
+## Quality checks (read-only)
+
+Three scripts inspect a run without launching anything. All take the **workdir**, work
+part-way through a run, and exit non-zero when something is wrong, so they compose into
+a shell gate:
+
+| script | answers |
+|---|---|
+| `inspect_qc.py <WORKDIR>` | did each sample clear the alignment QC thresholds? |
+| `check_layers.py <WORKDIR>` | does each `.h5ad` carry its velocity layers — and if not, **why**? |
+| `symctx.py` | what does this pipeline script actually do? (one symbol, not the whole file) |
+
+**`inspect_qc.py`** imports `qc_gate.evaluate`, so what it reports and what the in-DAG
+gate enforces are the same code path and cannot drift apart. It reads thresholds and
+`feature` from `--config`, overridable with `--min-valid-barcodes`,
+`--min-reads-mapped-gene`, `--min-estimated-cells`.
+
+```
+sample       status   valid_barcodes  reads_mapped_gene  estimated_cells  saturation
+Young1_BMMC  PASS             0.9354             0.5855             5576      0.7942
+```
+
+**`check_layers.py`** reads *both* ends — the `.h5ad`'s layer groups and the upstream
+`Solo.out/Velocyto/*.mtx` headers — because an h5ad with no layers looks identical
+whether STARsolo never counted them or the converter failed to attach them, and those
+need fixes in different files:
+
+| status | meaning |
+|---|---|
+| `OK` | all layers present and non-empty |
+| `NOT_ATTACHED` | `Solo.out/Velocyto` has counts the h5ad lacks — converter is reading the wrong subdir |
+| `UPSTREAM_EMPTY` | Velocyto `.mtx` exist but are all `nnz=0` — STARsolo counted nothing (`Gene` missing from `--soloFeatures`) |
+| `NO_VELOCYTO` | Velocyto was never requested |
+| `MISSING` | sample hasn't reached `to_h5ad` yet |
+
+It reads only HDF5 group structure and MatrixMarket headers, so cost is flat in file
+size — safe over a whole study. This is the check that catches a `no_layers` mis-wire
+before it reaches downstream velocity work.
+
+**`symctx.py`** prints a folded outline or one named symbol instead of a whole module,
+for reviewing pipeline code cheaply. Stdlib `ast` only:
+
+```bash
+python workflow/scripts/symctx.py outline workflow/scripts/qc_gate.py
+python workflow/scripts/symctx.py show    workflow/scripts/qc_gate.py evaluate
+python workflow/scripts/symctx.py find    workflow/scripts build_matrices
+```
 
 ## Chemistry
 
@@ -243,9 +298,19 @@ fraction, and the QC gate fails it.
 
 - **`feature`** (`config.yaml`) — `Gene` = exonic counts (standard **scRNA-seq**,
   default); `GeneFull` = full gene body incl. introns (**single-nucleus / snRNA-seq**,
-  where unspliced nuclear RNA dominates). Both modes still emit the Velocyto
+  where unspliced nuclear RNA dominates). Both modes emit the Velocyto
   spliced/unspliced/ambiguous layers. Not detectable from raw reads (it only shows as
   a high intronic fraction after alignment), so it's a manual call from the record.
+
+  The `starsolo` rule always passes **`Gene`** to `--soloFeatures` alongside whichever
+  feature you configure, because STARsolo's Velocyto counter consumes the `Gene` pass's
+  per-read assignments. Requesting `--soloFeatures GeneFull Velocyto` alone writes
+  spliced/unspliced/ambiguous matrices with `nnz=0` — silently, with STAR exiting 0 —
+  so `GeneFull` runs would otherwise produce h5ads with empty layers. The extra
+  `Solo.out/Gene/` directory is unused downstream (`qc_gate` and `to_h5ad` address
+  `Solo.out/<feature>/` explicitly); it costs a little disk and runtime. Run
+  `check_layers.py` after a `GeneFull` study to confirm — it reports `UPSTREAM_EMPTY`
+  if this ever regresses.
 - **`strand`** (per-sample sheet column, or `chemistry.strand` default) — `Forward`
   for 10x **3′** GEX, `Reverse` for 10x **5′** GEX. Not auto-detectable (3′ and 5′
   share the same barcode geometry); set it from the GEO/SRA record. A wrong call
@@ -272,7 +337,7 @@ re-running the same inputs gives the same result, so a human decides):
 | `corrupt`      | h5ad exists but unreadable (truncated / killed write)    | **rerun** — quarantined first, then regenerated |
 | `read_qc_fail` | raw reads failed read-QC (bad library / wrong chemistry) | **flag** — same reads re-align to the same failure |
 | `qc_fail`      | h5ad exists but not in `qc_pass.txt` (failed align gate) | **flag** — reason in `qc/qc_gate.tsv` |
-| `no_layers`    | QC passed but a velocity layer is absent                 | **flag** — silent mis-wire in `Solo.out/Velocyto/` |
+| `no_layers`    | QC passed but a velocity layer is absent                 | **flag** — silent mis-wire; run `check_layers.py <workdir>` to get the cause |
 
 **Read-QC axis (raw-read quality).** The Snakemake `read_qc` rule (`read_qc.py`)
 parses each run's FastQC output into `qc/read_qc.tsv` + `qc/read_qc_pass.txt`. It is
@@ -355,8 +420,12 @@ config/
   manifest.example.tsv    # batch manifest schema — copy to manifest.tsv (agent loop)
 workflow/
   Snakefile               # the DAG
-  scripts/                # prepare_runs, ncbi_utils, starsolo_to_h5ad, qc_gate,
-                          #   read_qc, reconcile, ...
+  scripts/                # in-DAG: prepare_runs, ncbi_utils, starsolo_to_h5ad,
+                          #   qc_gate, read_qc, reconcile, ...
+                          # read-only inspection (launch nothing, take a workdir):
+                          #   inspect_qc.py    QC metrics per sample
+                          #   check_layers.py  velocity layers present? why not?
+                          #   symctx.py        print one symbol, not a whole module
   envs/                   # conda env specs (scanpy.yaml, tools.yaml)
 tests/                    # offline unit tests (test_reconcile.py, test_read_qc.py)
 profiles/slurm/           # SLURM profile (edit partitions for your cluster)
