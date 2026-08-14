@@ -104,8 +104,10 @@ these via `--use-conda` (env specs in `workflow/envs/`).
     Cell Ranger (`lib/python/cellranger/barcodes/`); not in the raw refdata bundles.
 
   Put all the whitelists you might need in one directory; `prepare_runs.py` reads it
-  (`--whitelist-dir`, default `…/reference/10x_whitelists`) for the sequence probe,
-  and the Snakefile picks the one matching each sample's detected chemistry.
+  (`--whitelist-dir`, defaulting to `$SCRNASEQ_WHITELIST_DIR`) for the sequence probe,
+  and the Snakefile picks the one matching each sample's detected chemistry. With
+  neither set, the probe finds nothing and goes quiet — length and GEO-software
+  detection still work.
 
 ## Setup
 

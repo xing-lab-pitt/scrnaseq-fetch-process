@@ -21,6 +21,7 @@ chosen files (the barcode read should be ~26-28 bp). See select_reads().
 """
 import argparse
 import csv
+import os
 import sys
 from pathlib import Path
 
@@ -76,7 +77,11 @@ WHITELIST_SUFFIX = {
     "v4":  "3M-3pgex-may-2023.txt",
     "arc": "737K-arc-v1.txt",
 }
-DEFAULT_WHITELIST_DIR = "/net/capricorn/home/xing/lul176/reference/10x_whitelists"
+# Site-specific, so it has no portable default: set $SCRNASEQ_WHITELIST_DIR or pass
+# --whitelist-dir. Left unset, the barcode-probe channel simply finds no whitelists
+# and goes quiet (probe_barcode_chem skips files that don't exist) — length-based and
+# GEO-software detection still work, so chemistry calls degrade rather than break.
+DEFAULT_WHITELIST_DIR = os.environ.get("SCRNASEQ_WHITELIST_DIR", "")
 
 
 def _fetch_read_seqs(url, n_reads=2000, n_bytes=2_000_000):

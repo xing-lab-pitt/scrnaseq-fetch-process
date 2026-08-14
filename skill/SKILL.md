@@ -25,35 +25,37 @@ guard, launch, hang diagnosis, post-run verification).
 `config/`, `run_slurm.sh` — the parent of this `skill/` folder). All commands
 below run from there.
 
-> **THIS MACHINE (xing lab cluster) — local activation note.**
-> Actual runs use the established working directory, which already has a
-> filled-in `config/config.yaml`, the prebuilt human index, and prior `results/`:
-> ```
-> $PIPE = /net/capricorn/home/xing/lul176/skills_agent/fetch_process_snakemake
-> ```
-> The shared clean repo (`.../skills_agent/scrnaseq-fetch-process`) ships
-> `/path/to` placeholders for distribution — do NOT run there. Environment for
-> `run_slurm.sh` on this cluster:
-> ```
-> export SCRNASEQ_VENV=/net/capricorn/home/xing/lul176/mskcc/blood_combined/.venv
-> export SCRNASEQ_EXTRA_PATH=/opt/FastQC:/net/capricorn/home/xing/soh29/libraries/sratoolkit.3.0.2-ubuntu64/bin
-> ```
-> STAR 2.7.10a + samtools are already in `/usr/bin`.
+> **Site activation — fill these in for your machine, and keep the values out of
+> the repo.** Record them wherever you keep local notes (a gitignored file, your
+> shell profile), not here.
 >
-> Reference + whitelists on this cluster:
+> Run from a working copy that has a filled-in `config/config.yaml`, a built STAR
+> index, and its own `results/` — not from a fresh clone, which ships `/path/to`
+> placeholders:
 > ```
-> STAR index (human): /net/capricorn/home/xing/lul176/reference/GRCh38/STAR
-> 10x whitelists:     /net/capricorn/home/xing/lul176/reference/10x_whitelists/
->   737K-august-2016.txt   (v2, current config — 26bp R1)
+> $PIPE = <your working copy of this pipeline>
+> ```
+> Environment `run_slurm.sh` reads:
+> ```
+> export SCRNASEQ_VENV=<venv with snakemake + the SLURM executor plugin>
+> export SCRNASEQ_EXTRA_PATH=<dirs holding fastqc, sra-tools, … if not on PATH>
+> export SCRNASEQ_WHITELIST_DIR=<dir of 10x barcode whitelists>
+> ```
+> STAR and samtools must be on `PATH` (often already in `/usr/bin`); check with
+> `STAR --version`.
+>
+> Whitelist files the barcode probe looks for in `$SCRNASEQ_WHITELIST_DIR`
+> (obtain from your Cell Ranger installation — `lib/python/cellranger/barcodes/`):
+> ```
+>   737K-august-2016.txt   (v2 — 26bp R1)
 >   3M-february-2018.txt   (v3 — 28bp R1)
 >   3M-3pgex-may-2023.txt  (v4/GEM-X — same geometry, swap whitelist only)
 >   737K-arc-v1.txt        (10x Multiome/ARC GEX — snRNA; set chemistry: arc)
-> refdata bundles:    /net/capricorn/home/xing/lul176/reference/refdata-gex-{GRCh38,GRCm39}-2024-A.tar.gz
-> To keep a rebuilt index: set reference.star_index to a writable dir (e.g. a
-> sibling STAR_rebuild/); resolve_star_index builds into it once, then reuses it.
 > ```
-> This note is local-only (this copy of the skill is NOT the repo file); keep
-> machine paths out of the repo.
+> References: point `reference.fasta` / `reference.gtf` at a 10x `refdata-gex-*`
+> bundle (or your own genome + GTF). To keep a rebuilt index, set
+> `reference.star_index` to a writable dir (e.g. a sibling `STAR_rebuild/`);
+> `resolve_star_index` builds into it once, then reuses it.
 
 **Environment (site-specific — read the repo's README + `config/config.yaml`):**
 - Python env with `snakemake` + the SLURM executor plugin and the pins in
@@ -115,7 +117,9 @@ at ~0.8; random 16-mers match at ~1e-4. So a hit both **proves droplet data** an
 chemistry** (incl. `arc`). On a hit the run gets `barcode_read_length: 0`, which the Snakefile turns
 into `--soloBarcodeReadLength 0` so STARsolo reads CB/UMI from the fixed leading positions and
 ignores the tail. On a miss, `chemistry` stays empty and the guard **refuses** (not 10x droplet).
-The whitelist directory comes from `--whitelist-dir` (default `…/reference/10x_whitelists`).
+The whitelist directory comes from `--whitelist-dir`, defaulting to `$SCRNASEQ_WHITELIST_DIR`.
+Unset and not passed, this channel finds no whitelists and stays silent — the other two
+channels still run.
 
 **Channel 3 — GEO `!Sample_data_processing` software (reaches SRA-only runs).** GEO serves every
 sample as machine-readable SOFT text naming the submitter's own processing software.
