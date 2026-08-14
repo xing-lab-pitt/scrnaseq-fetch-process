@@ -243,25 +243,56 @@ fasterq-dump + gzip of a multi-GB run); growing `results/fastq/*.fastq.gz` = hea
 
 ## Phase 4 — Verify a completed run
 
+Two read-only scripts cover this. Both take the **workdir**, launch nothing, work
+part-way through a run, and exit non-zero when something is wrong — so they compose
+into a shell gate. Prefer them over ad-hoc `cat`/`grep` of Solo.out: they emit one
+compact table instead of dumping files.
+
 ```bash
-# 1. Barcode read length (proves chemistry parsed): expect 28 bp for v3
-zcat "$PIPE"/results/fastq/<SRR>_R1.fastq.gz | head -2 | awk 'NR==2{print length($0)" bp"}'
+# 1. QC metrics for every aligned sample (imports qc_gate.py, so these numbers are
+#    the same code path the in-DAG gate enforces — they cannot drift apart).
+python workflow/scripts/inspect_qc.py <WORKDIR> --config config/config.yaml
 
-# 2. STARsolo valid-barcode fraction should be healthy (not ~0)
-grep -i "Reads With Valid Barcodes" "$PIPE"/results/star/<SAMPLE>/Solo.out/Gene/Summary.csv
-
-# 3. h5ad has the spliced/unspliced/ambiguous layers
-python - <<'PY'
-import anndata as ad
-a = ad.read_h5ad("<PIPE>/results/h5ad/<SAMPLE>.h5ad")
-print(a.shape, "layers:", list(a.layers))   # expect spliced/unspliced/ambiguous
-PY
+# 2. Velocity layers present? Names the CAUSE, not just the symptom.
+python workflow/scripts/check_layers.py <WORKDIR>
 ```
+
+`inspect_qc.py` reads thresholds and `feature` from `--config`, overridable with
+`--min-valid-barcodes` / `--min-reads-mapped-gene` / `--min-estimated-cells`.
 A near-zero valid-barcode fraction means the chemistry/whitelist is wrong (e.g. v2
 data run with a v3 config) — go back to Phase 1 and fix `config/config.yaml`.
 
-The resulting `.h5ad` (Gene matrix in `X`, velocyto layers) is ready for
+`check_layers.py` distinguishes the two ways layers go missing, because they need
+fixes in different files:
+
+| status | meaning | fix |
+|---|---|---|
+| `OK` | all layers present, non-empty | — |
+| `NOT_ATTACHED` | Solo.out has counts, h5ad doesn't | `starsolo_to_h5ad.py` reads `Velocyto/<sub>` following the Gene matrix (`filtered`), but STARsolo only ever writes `Velocyto/raw/` |
+| `UPSTREAM_EMPTY` | Velocyto `.mtx` exist but all `nnz=0` | STARsolo's Velocyto counter consumes the **Gene** pass. `--soloFeatures GeneFull Velocyto` yields zeros *silently*; it needs `--soloFeatures Gene GeneFull Velocyto` |
+| `NO_VELOCYTO` | no Velocyto dir | Velocyto not requested in `--soloFeatures` |
+| `MISSING` | no h5ad yet | sample hasn't reached `to_h5ad` |
+
+`UPSTREAM_EMPTY` is the one to watch on **snRNA/Multiome runs**, since that is exactly
+the `feature: GeneFull` path — an all-zero Velocyto is easy to miss because STAR exits 0
+and the h5ad is written normally, just with no layers.
+
+It reads only HDF5 group structure and MatrixMarket headers, so cost is flat in file
+size — safe to run over a whole study.
+
+The resulting `.h5ad` (count matrix in `X`, velocyto layers) is ready for
 downstream scanpy analysis (QC, clustering, UMAP, DE).
+
+### Reading the pipeline's own code cheaply
+
+`workflow/scripts/symctx.py` prints just the slice of Python you need, so reviewing a
+script doesn't pull the whole file into context. Stdlib `ast` only.
+
+```bash
+python workflow/scripts/symctx.py outline workflow/scripts/qc_gate.py   # signatures, bodies folded
+python workflow/scripts/symctx.py show   workflow/scripts/qc_gate.py evaluate
+python workflow/scripts/symctx.py find   workflow/scripts build_matrices
+```
 
 ## Phase 5 — Batch completeness & the agent loop (many studies)
 
