@@ -274,7 +274,17 @@ rule starsolo:
         bc_read_len_flag=lambda wc: get_sample_chemistry(wc.sample)["bc_read_len_flag"],
         # Gene (scRNA) or GeneFull (snRNA), per-run config toggle. Injected here
         # (not in the shared starsolo_extra) so --soloFeatures is set exactly once.
-        feature=FEATURE,
+        #
+        # `Gene` is ALWAYS requested, even when FEATURE is GeneFull: STARsolo's
+        # Velocyto counter consumes the Gene pass's per-read assignments, so
+        # "--soloFeatures GeneFull Velocyto" writes spliced/unspliced/ambiguous
+        # matrices with nnz=0 — silently, with STAR exiting 0 and Velocyto's
+        # Features.stats all zeros. Measured on a 2M-read arc/GeneFull subset:
+        # "GeneFull Velocyto" -> spliced nnz=0; "Gene GeneFull Velocyto" -> 741613.
+        # The extra Solo.out/Gene/ dir is unused downstream (qc_report and to_h5ad
+        # both address Solo.out/<FEATURE>/ explicitly) — it only costs a little
+        # disk and runtime.
+        solo_features=" ".join(dict.fromkeys(["Gene", FEATURE, "Velocyto"])),
         extra=config["starsolo_extra"],
     conda: "../envs/tools.yaml"
     # Standard 10x two-file layout: barcode+UMI and cDNA are SEPARATE fastqs
@@ -301,7 +311,7 @@ rule starsolo:
              --soloUMIstart {params.umi_start} --soloUMIlen {params.umi_len} \
              --soloStrand {params.strand} \
              {params.bc_read_len_flag} \
-             --soloFeatures {params.feature} Velocyto \
+             --soloFeatures {params.solo_features} \
              --outFileNamePrefix {params.prefix} \
              {params.extra}
         """

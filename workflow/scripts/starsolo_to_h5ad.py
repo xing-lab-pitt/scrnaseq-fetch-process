@@ -87,7 +87,14 @@ def build_matrices(solo_dir, use_filtered=True, feature="Gene"):
     barcodes, gene_ids, gene_names, X = load_matrix(solo / feature / sub, "matrix.mtx")
 
     layers = {}
+    # STARsolo writes the Velocyto feature to raw/ only — it has no cell-calling
+    # step, so Velocyto/filtered/ does not exist. Following `sub` here (which is
+    # "filtered" whenever X is) silently skipped the layers entirely. Prefer sub
+    # when present, fall back to raw, and let reindex() below project the raw
+    # barcode set onto X's — which is exactly what it was written to do.
     velo = solo / "Velocyto" / sub
+    if not velo.exists():
+        velo = solo / "Velocyto" / "raw"
     if velo.exists():
         for layer, fname in [("spliced", "spliced.mtx"),
                              ("unspliced", "unspliced.mtx"),
