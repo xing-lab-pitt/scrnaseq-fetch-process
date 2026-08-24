@@ -380,6 +380,18 @@ operational (stale locks) — none argue for abandoning Snakemake.
 ## Key files in `$PIPE`
 - `workflow/scripts/prepare_runs.py` — accession → sample sheet + chemistry guard.
 - `workflow/scripts/ncbi_utils.py` — GEO/SRA metadata + ENA URL resolution (vendored).
+- `workflow/scripts/fetch_geo_supp.py` — list/download a GEO record's **supplementary**
+  files (the authors' own `.h5ad`, `.rds`, `.loom`, mtx bundles). Standalone, NOT in the DAG:
+  ```bash
+  python workflow/scripts/fetch_geo_supp.py GSE218661                       # list only
+  python workflow/scripts/fetch_geo_supp.py GSE218661 -o DIR --download \
+      --pattern '*.h5ad.gz' --gunzip
+  ```
+  Resumes (`curl -C -`), verifies Content-Length, skips files already complete.
+  Exit 0 ok / 1 transfer failed / 2 accession or pattern matched nothing. An author h5ad is
+  **not** equivalent to pipeline output — different reference and filtering, and normally no
+  spliced/unspliced/ambiguous layers. Use it for a quick look; reprocess (Phases 1–2) when the
+  matrix must be comparable across studies or carry velocity layers.
 - `workflow/scripts/starsolo_to_h5ad.py` — STARsolo Gene/GeneFull + Velocyto feature → single .h5ad (`--feature Gene|GeneFull`).
 
 > **"Velocyto" here = STARsolo's `--soloFeatures Velocyto` mode, NOT the separate
