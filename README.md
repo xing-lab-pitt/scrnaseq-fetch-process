@@ -413,6 +413,32 @@ GATE 2 (human) ─ review the reconcile report + qc_gate.tsv + read_qc.tsv; deci
 - **Tests:** `tests/test_reconcile.py` (every category + action + ledger idempotency)
   and `tests/test_read_qc.py` (offline role-aware read-QC verdict).
 
+## Author-processed h5ad from GEO (optional, outside the DAG)
+
+Some submitters attach their own processed matrices to the GEO record. To list or
+download those supplementary files:
+
+```bash
+# list what is attached (default: downloads nothing)
+python workflow/scripts/fetch_geo_supp.py GSE218661
+
+# fetch just the h5ad files and decompress them
+python workflow/scripts/fetch_geo_supp.py GSE218661 -o DIR --download \
+    --pattern '*.h5ad.gz' --gunzip
+```
+
+Works for GSE/GSM/GPL. Transfers resume (`curl -C -`), are checked against the
+server's `Content-Length`, and files already present at the right size are skipped.
+Exit status: 0 all requested files present, 1 a transfer failed, 2 the accession or
+pattern matched nothing.
+
+Deliberately not a Snakemake rule. An author h5ad is not equivalent to this
+pipeline's output — different reference, different filtering, and normally no
+spliced/unspliced/ambiguous layers — and a rule producing `results/h5ad/<sample>.h5ad`
+would make Snakemake treat a sample as processed when it never was. Use it for a
+quick look at a study; run the pipeline when the matrix has to be comparable across
+studies or carry velocity layers.
+
 ## Repository layout
 
 ```
@@ -428,6 +454,7 @@ workflow/
                           #   inspect_qc.py    QC metrics per sample
                           #   check_layers.py  velocity layers present? why not?
                           #   symctx.py        print one symbol, not a whole module
+                          #   fetch_geo_supp.py  GEO supplementary files (see below)
   envs/                   # conda env specs (scanpy.yaml, tools.yaml)
 tests/                    # offline unit tests (test_reconcile.py, test_read_qc.py)
 profiles/slurm/           # SLURM profile (edit partitions for your cluster)
