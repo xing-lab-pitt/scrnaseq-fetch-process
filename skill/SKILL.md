@@ -41,6 +41,10 @@ below run from there.
 > export SCRNASEQ_EXTRA_PATH=<dirs holding fastqc, sra-tools, … if not on PATH>
 > export SCRNASEQ_WHITELIST_DIR=<dir of 10x barcode whitelists>
 > ```
+> `SCRNASEQ_WHITELIST_DIR` is newly required — `prepare_runs.py` used to hardcode a
+> site path and now defaults to empty. Left unset, the barcode-probe chemistry
+> channel finds no whitelists and goes silent, with no error.
+>
 > STAR and samtools must be on `PATH` (often already in `/usr/bin`); check with
 > `STAR --version`.
 >
