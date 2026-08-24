@@ -197,35 +197,22 @@ rule download_fastq:
         if [ "{params.src}" = "sra" ]; then
             # --- SRA fallback: prefetch + fasterq-dump -----------------------
             [ -n "{params.sra_bin}" ] && export PATH="{params.sra_bin}:$PATH"
-            # --- stage on node-local disk, not the shared mount ----------------
-            # fasterq-dump writes UNCOMPRESSED FASTQ plus about as much again in
-            # sort temp: ~900 GB peak for one large ATAC run. /scratch is
-            # node-local (1.9-3.6 TB) so none of that touches shared storage.
-            # Falls back to the workdir if /scratch is absent or unwritable.
-            STAGE="${{SCATAC_STAGE_ROOT:-/scratch}}/sra_${{SLURM_JOB_ID:-$$}}"
-            if mkdir -p "$STAGE" 2>/dev/null && [ -w "$STAGE" ]; then
-                # Never strand hundreds of GB on a shared compute node.
-                trap 'rm -rf "$STAGE"' EXIT INT TERM
-                echo "staging on node-local $STAGE" >&2
-            else
-                STAGE="{params.tmp}"
-                echo "NOTE: /scratch unavailable; staging on shared storage" >&2
-            fi
-            rm -rf "$STAGE"; mkdir -p "$STAGE"
-            prefetch -O "$STAGE" {wildcards.srr}
+            rm -rf "{params.tmp}"; mkdir -p "{params.tmp}"
+            prefetch -O "{params.tmp}" {wildcards.srr}
             fasterq-dump --split-files --include-technical --threads {threads} \
-                -t "$STAGE" -O "$STAGE" "$STAGE/{wildcards.srr}/{wildcards.srr}.sra" \
+                -O "{params.tmp}" "{params.tmp}/{wildcards.srr}/{wildcards.srr}.sra" \
                 || fasterq-dump --split-files --include-technical --threads {threads} \
-                     -O "$STAGE" {wildcards.srr}
+                     -O "{params.tmp}" {wildcards.srr}
             # Select barcode/cDNA from the produced _1/_2[/_3] files by suffix.
-            fq=$(ls "$STAGE"/{wildcards.srr}_*.fastq | sort)
+            fq=$(ls "{params.tmp}"/{wildcards.srr}_*.fastq | sort)
             n=$(echo "$fq" | wc -l)
             if [ "$n" -eq 2 ]; then bc=$(echo "$fq" | sed -n 1p); cd=$(echo "$fq" | sed -n 2p)
             elif [ "$n" -eq 3 ]; then bc=$(echo "$fq" | sed -n 2p); cd=$(echo "$fq" | sed -n 3p)
             else echo "Unexpected FASTQ count ($n) for {wildcards.srr}: $fq" >&2; exit 1; fi
             gzip -c "$bc" > {output.r1}
             gzip -c "$cd" > {output.r2}
-                    else
+            rm -rf "{params.tmp}"
+        else
             # --- ENA: direct download of pre-split FASTQs --------------------
             curl -sSL --fail --retry 5 -o {output.r1} "{params.u1}"
             curl -sSL --fail --retry 5 -o {output.r2} "{params.u2}"
