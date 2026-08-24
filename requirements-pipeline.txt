@@ -1,9 +1,7 @@
 # Subset of the project's requirements.txt that the pipeline's Python steps
 # import. Pins are IDENTICAL to requirements.txt so the two never diverge.
 # check_versions.py enforces these against the active environment at preflight.
-# anndata bumped 0.10.9 -> 0.11.4 when scvi-tools was added to the shared venv;
-# the pipeline's h5ad I/O round-trips fine under 0.11.4 (uses h5py, not zarr).
-anndata==0.11.4
+anndata==0.10.9
 scanpy==1.12
 numpy==2.2.6
 pandas==2.3.3

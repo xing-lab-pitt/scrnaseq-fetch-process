@@ -39,19 +39,12 @@ below run from there.
 > ```
 > export SCRNASEQ_VENV=<venv with snakemake + the SLURM executor plugin>
 > export SCRNASEQ_EXTRA_PATH=<dirs holding fastqc, sra-tools, … if not on PATH>
+> export SCRNASEQ_WHITELIST_DIR=<dir of 10x barcode whitelists>
 > ```
-> The whitelist directory is NOT an environment variable: `prepare_runs.py` takes it
-> from `chemistry.whitelist` in `config/config.yaml` (the same path STARsolo aligns
-> with, so the two can't disagree), and the Snakefile reads that key too. Override for
-> one call with `--whitelist-dir`, or point at another config with `--config`.
-> `$SCRNASEQ_WHITELIST_DIR` still wins over the config if you export it, but nothing
-> needs it. With no config key at all, the barcode-probe chemistry channel finds no
-> whitelists — `prepare_runs.py` prints a warning and the other two channels carry on.
->
 > STAR and samtools must be on `PATH` (often already in `/usr/bin`); check with
 > `STAR --version`.
 >
-> Whitelist files the barcode probe looks for in that directory
+> Whitelist files the barcode probe looks for in `$SCRNASEQ_WHITELIST_DIR`
 > (obtain from your Cell Ranger installation — `lib/python/cellranger/barcodes/`):
 > ```
 >   737K-august-2016.txt   (v2 — 26bp R1)
@@ -124,11 +117,9 @@ at ~0.8; random 16-mers match at ~1e-4. So a hit both **proves droplet data** an
 chemistry** (incl. `arc`). On a hit the run gets `barcode_read_length: 0`, which the Snakefile turns
 into `--soloBarcodeReadLength 0` so STARsolo reads CB/UMI from the fixed leading positions and
 ignores the tail. On a miss, `chemistry` stays empty and the guard **refuses** (not 10x droplet).
-The whitelist directory defaults to the directory of `chemistry.whitelist` in
-`config/config.yaml`, so it is configured in exactly one place and always matches the whitelist
-STARsolo aligns with (`--whitelist-dir` or `$SCRNASEQ_WHITELIST_DIR` override it, in that order).
-With no such key, this channel finds no whitelists and prints a warning — the other two channels
-still run.
+The whitelist directory comes from `--whitelist-dir`, defaulting to `$SCRNASEQ_WHITELIST_DIR`.
+Unset and not passed, this channel finds no whitelists and stays silent — the other two
+channels still run.
 
 **Channel 3 — GEO `!Sample_data_processing` software (reaches SRA-only runs).** GEO serves every
 sample as machine-readable SOFT text naming the submitter's own processing software.

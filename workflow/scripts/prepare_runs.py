@@ -77,34 +77,11 @@ WHITELIST_SUFFIX = {
     "v4":  "3M-3pgex-may-2023.txt",
     "arc": "737K-arc-v1.txt",
 }
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = REPO_ROOT / "config" / "config.yaml"
-
-
-def whitelist_dir_from_config(config_path=DEFAULT_CONFIG):
-    """The directory holding the 10x whitelists, taken from `chemistry.whitelist`.
-
-    Config already carries that path for STARsolo, and the Snakefile reads the
-    directory off it the same way, so this stays the single place a site records
-    where its whitelists live. Returns "" when the config or the key is absent —
-    the barcode probe then finds no whitelists and goes quiet, which the caller
-    reports.
-    """
-    try:
-        import yaml
-        with open(config_path) as fh:
-            cfg = yaml.safe_load(fh) or {}
-    except Exception:
-        return ""
-    wl = (cfg.get("chemistry") or {}).get("whitelist") or ""
-    return str(Path(wl).parent) if wl else ""
-
-
-def resolve_whitelist_dir(cli_value="", config_path=DEFAULT_CONFIG):
-    """--whitelist-dir wins, then $SCRNASEQ_WHITELIST_DIR, then config."""
-    return (cli_value
-            or os.environ.get("SCRNASEQ_WHITELIST_DIR", "")
-            or whitelist_dir_from_config(config_path))
+# Site-specific, so it has no portable default: set $SCRNASEQ_WHITELIST_DIR or pass
+# --whitelist-dir. Left unset, the barcode-probe channel simply finds no whitelists
+# and goes quiet (probe_barcode_chem skips files that don't exist) — length-based and
+# GEO-software detection still work, so chemistry calls degrade rather than break.
+DEFAULT_WHITELIST_DIR = os.environ.get("SCRNASEQ_WHITELIST_DIR", "")
 
 
 def _fetch_read_seqs(url, n_reads=2000, n_bytes=2_000_000):
@@ -639,15 +616,11 @@ def main():
                          "length can't tell from v3/v4), fills chemistry for SRA-only "
                          "runs, and sharpens non-droplet refusals. Use for offline "
                          "runs or to fall back to length/probe detection only.")
-    ap.add_argument("--whitelist-dir", default="",
+    ap.add_argument("--whitelist-dir", default=DEFAULT_WHITELIST_DIR,
                     help="Dir of 10x cell-barcode whitelists (737K-arc-v1.txt, "
                          "3M-february-2018.txt, …). Used to identify chemistry AND "
                          "confirm droplet data when a run's R1 is over-sequenced "
-                         "(>28 bp) so read length alone can't classify it. Defaults "
-                         "to the directory of chemistry.whitelist in --config.")
-    ap.add_argument("--config", default=str(DEFAULT_CONFIG),
-                    help="Pipeline config the whitelist directory is read from "
-                         f"(default: {DEFAULT_CONFIG}).")
+                         "(>28 bp) so read length alone can't classify it.")
     args = ap.parse_args()
 
     # --multiome forces chemistry=arc on all rows and aligns the guard's expected
@@ -672,16 +645,8 @@ def main():
         if run.get("srr"):
             srr_to_gsm[run["srr"]] = run.get("gsm") or run["srr"]
 
-    whitelist_dir = resolve_whitelist_dir(args.whitelist_dir, args.config)
-    if whitelist_dir:
-        print(f"  whitelist dir: {whitelist_dir}")
-    else:
-        print("  WARNING: no whitelist dir (chemistry.whitelist missing from "
-              f"{args.config}) — the barcode-sequence probe is disabled, so an "
-              "over-sequenced R1 can't be confirmed as 10x.")
-
     rows = build_rows(args.accession, srr_to_gsm, runs_meta, chem_override=chem_override,
-                      whitelist_dir=whitelist_dir,
+                      whitelist_dir=args.whitelist_dir,
                       use_geo_software=not args.no_geo_software)
     if not rows:
         sys.exit(f"No runs resolved for {args.accession}")
