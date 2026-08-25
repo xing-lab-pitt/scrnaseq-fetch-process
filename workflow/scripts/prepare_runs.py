@@ -50,12 +50,15 @@ def peek_read_length(url, n_reads=2000, n_bytes=1_000_000):
     import gzip, io
     from collections import Counter
     from urllib.request import Request, urlopen
+    # Bound before the try: urlopen raises URLError (an OSError) on a dead mirror, and
+    # the handler below swallows it, so the name must already exist to report "no reads".
+    seqs = []
     try:
         req = Request(url, headers={"Range": f"bytes=0-{n_bytes}"})
         with urlopen(req, timeout=60) as r:
             blob = r.read()
         # gzip may complain about the truncated tail; read what we can.
-        seqs, gz = [], gzip.GzipFile(fileobj=io.BytesIO(blob))
+        gz = gzip.GzipFile(fileobj=io.BytesIO(blob))
         for i, line in enumerate(gz):
             if i % 4 == 1:
                 seqs.append(len(line.rstrip(b"\n")))
@@ -251,11 +254,23 @@ def classify_chemistry(bc_len, cdna_len=None):
 
 def fetch_ena_table(study_accession):
     """ENA filereport incl. md5. Returns {srr: {'urls': [...], 'md5': [...]}}."""
+    import time
     from urllib.request import urlopen
     url = (f"https://www.ebi.ac.uk/ena/portal/api/filereport?accession={study_accession}"
            "&result=read_run&fields=run_accession,fastq_ftp,fastq_md5&format=tsv")
-    with urlopen(url, timeout=60) as r:
-        lines = r.read().decode().strip().split("\n")
+    # ENA drops this request often enough to matter: a 400 on one attempt and a
+    # chunked response cut short on the next. Both clear on a retry, so one bad
+    # attempt must not cost the whole sheet.
+    for attempt in range(5):
+        try:
+            with urlopen(url, timeout=60) as r:
+                lines = r.read().decode().strip().split("\n")
+            break
+        except Exception as e:
+            if attempt == 4:
+                raise
+            print(f"  ENA filereport attempt {attempt + 1} failed ({type(e).__name__}); retrying")
+            time.sleep(2 * (attempt + 1))
     out = {}
     header = lines[0].split("\t")
     ri, fi, mi = (header.index(c) for c in ("run_accession", "fastq_ftp", "fastq_md5"))
