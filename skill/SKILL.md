@@ -56,6 +56,16 @@ below run from there.
 > bundle (or your own genome + GTF). To keep a rebuilt index, set
 > `reference.star_index` to a writable dir (e.g. a sibling `STAR_rebuild/`);
 > `resolve_star_index` builds into it once, then reuses it.
+>
+> **Non-10x genome: build the index yourself first.** `resolve_star_index` builds
+> with STAR's defaults, and two of them are wrong outside the 10x bundles. A small
+> genome needs `--genomeSAindexNbases 12` (the default 14 is sized for ~3 Gb). A GTF
+> that names genes in an attribute other than `gene_name` needs
+> `--sjdbGTFtagExonParentGeneName <attr>` (FlyBase uses `gene_symbol`) — without it
+> every gene name comes out blank and `adata.var` carries bare accession IDs, with no
+> error anywhere. Check yours with `grep -m1 gene_ your.gtf`. Build once, then point
+> `reference.star_index` at that directory so the resolver symlinks instead of
+> rebuilding. The README has a worked example (Drosophila, FlyBase r6.31).
 
 **Environment (site-specific — read the repo's README + `config/config.yaml`):**
 - Python env with `snakemake` + the SLURM executor plugin and the pins in
