@@ -134,6 +134,44 @@ export SCRNASEQ_EXTRA_PATH=/opt/FastQC:/opt/sratoolkit/bin   # tool dirs not in 
 `config/config.yaml` and any real `samples.tsv` are gitignored, so your local
 paths never get committed.
 
+## Non-10x reference (worked example: Drosophila, FlyBase r6.31)
+
+10x ships prebuilt bundles for a handful of species only. For anything else, fetch a
+genome + GTF yourself and build the STAR index once, so every run reuses it.
+
+```bash
+# 1. Genome + GTF. FlyBase's plain FTP is blocked from many clusters; the S3 mirror works.
+BASE=https://s3ftp.flybase.org/genomes/Drosophila_melanogaster/dmel_r6.31_FB2019_06
+curl -fLO $BASE/fasta/dmel-all-chromosome-r6.31.fasta.gz
+curl -fLO $BASE/gtf/dmel-all-r6.31.gtf.gz
+gunzip -k dmel-all-chromosome-r6.31.fasta.gz dmel-all-r6.31.gtf.gz
+
+# 2. Build the index. The last two flags are not optional for this genome.
+STAR --runMode genomeGenerate --runThreadN 16 \
+     --genomeDir STAR_2.7.10a \
+     --genomeFastaFiles dmel-all-chromosome-r6.31.fasta \
+     --sjdbGTFfile dmel-all-r6.31.gtf \
+     --sjdbOverhang 100 \
+     --genomeSAindexNbases 12 \
+     --sjdbGTFtagExonParentGeneName gene_symbol
+```
+
+| flag | why it is needed |
+|---|---|
+| `--genomeSAindexNbases 12` | The default 14 is sized for a ~3 Gb genome. STAR's own rule is `min(14, log2(genomeLength)/2 - 1)`, which gives 12 for the 144 Mb fly genome. At 14 the suffix array is oversized and STAR warns. |
+| `--sjdbGTFtagExonParentGeneName gene_symbol` | STAR looks for gene names in a `gene_name` attribute. FlyBase GTFs store them in `gene_symbol`, so without this every gene name comes out blank and `adata.var` carries bare `FBgn...` IDs. Baked in at index build; it cannot be fixed afterwards. |
+
+Check which attribute your GTF uses before building (`grep -m1 gene_ your.gtf`).
+Ensembl GTFs already use `gene_name`, so the tag flag is unnecessary there.
+
+Then point `reference.star_index` at that directory. `resolve_star_index` compares its
+`genomeVersion` with the pipeline's STAR and symlinks it into `<workdir>/star_index`,
+so the index is built once and never rebuilt per run.
+
+**Single-nucleus studies** (most whole-animal fly atlases are): set `feature: GeneFull`.
+Do not reach for a pre-mRNA GTF instead — it makes every read look exonic, which
+silently empties the `unspliced` velocity layer.
+
 ## Usage
 
 ```bash
