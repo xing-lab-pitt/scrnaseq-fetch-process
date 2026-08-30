@@ -93,7 +93,7 @@ fi
 
 # Sanity: fail early if a required binary is missing. sra-tools (prefetch) is
 # only needed for source=sra runs, so it is checked but non-fatal.
-for t in snakemake STAR samtools fastqc multiqc; do
+for t in snakemake STAR samtools fastqc multiqc pigz; do
     command -v "$t" >/dev/null || { echo "MISSING on PATH: $t (see run_slurm.sh header / README)" >&2; exit 1; }
 done
 command -v prefetch >/dev/null || echo "NOTE: prefetch not on PATH (only needed for source=sra runs)" >&2

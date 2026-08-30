@@ -257,8 +257,8 @@ rule download_fastq:
                 echo "MISMATCHED read pair for {wildcards.srr}: R1 has $bc_lines lines, R2 has $cd_lines" >&2
                 exit 1
             fi
-            gzip -c "$bc" > {output.r1}
-            gzip -c "$cd" > {output.r2}
+            pigz -p {threads} -c "$bc" > {output.r1}
+            pigz -p {threads} -c "$cd" > {output.r2}
                     else
             # --- ENA: direct download of pre-split FASTQs --------------------
             curl -sSL --fail --retry 5 -o {output.r1} "{params.u1}"
