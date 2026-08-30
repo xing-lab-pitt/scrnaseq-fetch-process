@@ -30,10 +30,15 @@
 #                         export SCRNASEQ_EXTRA_PATH=/opt/FastQC:/opt/sratoolkit/bin
 #   SCRNASEQ_PROFILE    Snakemake profile dir (default: profiles/slurm)
 #
-# Adjust the #SBATCH lines below (partition, time) to your cluster.
+# Adjust the #SBATCH lines below (partition, time) to your cluster. Keep
+# --cpus-per-task at 8 or more: the controller's SLURM executor plugin spawns one
+# polling thread per concurrently-tracked job (see profiles/slurm's `jobs:`), and
+# on cgroup-managed clusters a too-small CPU allocation can cap the controller's
+# thread budget, crashing it with "RuntimeError: can't start new thread" under
+# sustained concurrency/retries. 1 CPU was not enough at `jobs: 24`.
 # =============================================================================
 #SBATCH -J snakemake_ctl
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=4G
 #SBATCH -t 7-00:00:00
 #SBATCH --output=snakemake_ctl.%j.log
@@ -43,6 +48,34 @@ set -euo pipefail
 # Run from the repo root (this script's directory), wherever it was cloned.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
+
+# Visibility guard: a bare invocation with no --configfile silently falls back to
+# Snakemake's default config/config.yaml. That's fine for a single-study clone (see
+# README quickstart), but the moment more than one study's config lives side by
+# side in config/, that silent default can run the WRONG study with zero errors —
+# it's a fully valid, self-consistent config, just not the intended one. Rather
+# than block the documented single-config workflow, always resolve and print
+# LOUDLY which config is about to run, so a wrong-or-defaulted choice is obvious
+# at a glance in the log instead of invisible.
+CONFIGFILE=""
+prev=""
+for arg in "$@"; do
+    [ "$prev" = "--configfile" ] && CONFIGFILE="$arg"
+    prev="$arg"
+done
+: "${CONFIGFILE:=config/config.yaml}"
+if [ ! -f "$CONFIGFILE" ]; then
+    echo "ERROR: configfile '$CONFIGFILE' not found." >&2
+    echo "First run: cp config/config.example.yaml config/config.yaml (see README)," >&2
+    echo "or pass --configfile config/config.<STUDY>.yaml explicitly." >&2
+    exit 1
+fi
+echo "=============================================================="
+echo "LAUNCHING WITH configfile: $CONFIGFILE"
+grep -E '^workdir:|^samples_tsv:' "$CONFIGFILE" | sed 's/^/  /'
+echo "If more than one study's config lives in config/, pass --configfile explicitly"
+echo "next time — a bare invocation always defaults to config/config.yaml."
+echo "=============================================================="
 
 PROFILE="${SCRNASEQ_PROFILE:-profiles/slurm}"
 

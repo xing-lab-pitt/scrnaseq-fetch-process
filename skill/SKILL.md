@@ -227,17 +227,35 @@ The SLURM executor submits each rule as its own right-sized job (STARsolo → bi
 
 ```bash
 cd "$PIPE"
-sbatch run_slurm.sh                 # whole sheet, all samples
+sbatch run_slurm.sh                 # whole sheet, all samples (uses config/config.yaml)
 ./run_slurm.sh -n                   # dry-run on the login node first (recommended)
 ```
 
+`run_slurm.sh` now always prints, loudly, which configfile it resolved and that config's
+`workdir`/`samples_tsv` near the top of its log — check that against what you intended before
+trusting the run. **The moment you keep more than one study's config side by side in `config/`**
+(common once you're not starting from a fresh clone), pass `--configfile` explicitly on every
+launch instead of relying on the default:
+```bash
+sbatch run_slurm.sh --configfile config/config.<STUDY>.yaml
+```
+A bare invocation with multiple configs present will still run — silently defaulting to
+`config/config.yaml` — and that default may be a *different, fully valid* study. Nothing inside the
+pipeline can catch this: the "genomeVersion" check in `resolve_star_index` is STAR's own
+index-format compatibility (binary vs. index), not species, and configs carry no
+`species`/`organism` field. Each config is fully self-contained (own `fasta`/`gtf`/`star_index`/
+`workdir`/`samples_tsv`), so the wrong one runs cleanly to completion with zero errors — it just
+processes the wrong study.
+
 **Smoke-test ONE sample end-to-end** (5 jobs: check_versions → download_fastq →
-fastqc → starsolo → to_h5ad) by targeting that sample's outputs directly:
+fastqc → starsolo → to_h5ad) by targeting that sample's outputs directly. Put targets *before*
+`--configfile` — anything after it is consumed as another config file:
 ```bash
 sbatch run_slurm.sh \
   results/h5ad/<SAMPLE>.h5ad \
   results/qc/fastqc/<SRR>_R1_fastqc.zip \
-  results/qc/fastqc/<SRR>_R2_fastqc.zip
+  results/qc/fastqc/<SRR>_R2_fastqc.zip \
+  --configfile config/config.<STUDY>.yaml
 ```
 Do **not** add `qc_gate` / `merge` / `multiqc` to a single-sample target — those
 rules `expand` over ALL samples and won't resolve.
@@ -249,6 +267,16 @@ squeue -u $USER -o "%.10i %.22j %.8T %.10M %R"      # ctl + per-rule jobs
 LOG=$(ls -t "$PIPE"/.snakemake/log/*.snakemake.log | head -1); tail -20 "$LOG"
 ```
 Per-rule slurm logs: `$PIPE/.snakemake/slurm_logs/rule_<name>/<wildcards>/<jobid>.log`.
+
+**Before trusting a run, don't stop at the "Config file(s):" / launch banner line — confirm it's
+actually processing the study you intended:**
+```bash
+grep -aoE "SRR[0-9]+" "$LOG" | sort -u | head           # accessions actually in flight
+grep -Fc "<one of those SRRs>" config/samples.<STUDY>.tsv   # do they belong to this study?
+readlink -f <workdir>/star_index                          # resolves to the right reference?
+ls <workdir>/fastq/ | tail                                 # outputs landing in the right workdir?
+```
+A config filename alone isn't proof it's the right *study* — only that some valid config loaded.
 
 The account-guessing lines (`No SLURM account given, trying to guess` /
 `sacct: invalid option`) are **cosmetic** — the executor proceeds without an account.
