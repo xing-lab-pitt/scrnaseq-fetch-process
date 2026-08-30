@@ -283,6 +283,23 @@ The account-guessing lines (`No SLURM account given, trying to guess` /
 They are NOT the hang. A download job legitimately takes 20–40 min (prefetch +
 fasterq-dump + gzip of a multi-GB run); growing `results/fastq/*.fastq.gz` = healthy.
 
+**Check node-local `/scratch` usage on any node running SRA downloads, especially during a long
+multi-sample run.** `download_fastq`'s SRA branch stages on node-local disk, and orphaned
+`sra_<jobid>` directories from past killed/crashed jobs (`trap ... EXIT` doesn't fire on SIGKILL)
+accumulate there over days until a node fills up — a download that starts writing into an
+almost-full disk produces a **silently truncated FASTQ**, not a clean error. This has caused a
+whole day of hard-to-diagnose corruption on a real run: nodes at 90%+ full from dozens of orphaned
+staging dirs going back days, and every truncated file traced back to landing on one of them.
+```bash
+squeue -u $USER -h -o "%N" | sort -u                              # nodes your jobs are on
+for n in <nodes>; do ssh "$n" 'df -h /scratch'; done               # check each
+ssh <node> 'du -sh /scratch/sra_* 2>/dev/null | sort -rh | head'   # find the big ones
+```
+Cross-check `sra_<jobid>` directory names against `squeue -u $USER -h -o "%i"` — any not currently
+running is orphaned and safe to delete. The rule has a preflight check that refuses to stage if
+free space is under 100GB (fails loudly instead of truncating), but that doesn't clean up existing
+orphaned space — do the sweep above periodically on any node this pipeline uses heavily.
+
 ## Phase 4 — Verify a completed run
 
 Two read-only scripts cover this. Both take the **workdir**, launch nothing, work

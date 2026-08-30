@@ -212,6 +212,21 @@ rule download_fastq:
                 echo "NOTE: /scratch unavailable; staging on shared storage" >&2
             fi
             rm -rf "$STAGE"; mkdir -p "$STAGE"
+            # Preflight: refuse to stage if this node's local disk is already tight.
+            # Node-local /scratch fills up over time with orphaned sra_<jobid> dirs
+            # left behind by killed/crashed jobs (trap EXIT does not fire on SIGKILL),
+            # and a download that starts writing into an almost-full disk produces a
+            # SILENTLY TRUNCATED FASTQ, not a clean error - this is what actually
+            # caused the GSE310923 SRR36139200/175/184/274/289 corruption incidents.
+            # Fail loudly here instead so Snakemake retries (likely on a different
+            # node) rather than shipping a truncated file as "done".
+            avail_gb=$(df -Pk "$STAGE" | tail -1 | awk '{{print int($4/1024/1024)}}')
+            if [ "$avail_gb" -lt 100 ]; then
+                echo "REFUSING to stage on $STAGE: only ${{avail_gb}}GB free (need >=100GB)." >&2
+                echo "This node's /scratch is likely clogged with orphaned sra_* dirs from" >&2
+                echo "past killed jobs - check for dirs matching dead job IDs and delete them." >&2
+                exit 1
+            fi
             prefetch -O "$STAGE" {wildcards.srr}
             fasterq-dump --split-files --include-technical --threads {threads} \
                 -t "$STAGE" -O "$STAGE" "$STAGE/{wildcards.srr}/{wildcards.srr}.sra" \
