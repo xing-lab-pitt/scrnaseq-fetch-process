@@ -223,6 +223,25 @@ rule download_fastq:
             if [ "$n" -eq 2 ]; then bc=$(echo "$fq" | sed -n 1p); cd=$(echo "$fq" | sed -n 2p)
             elif [ "$n" -eq 3 ]; then bc=$(echo "$fq" | sed -n 2p); cd=$(echo "$fq" | sed -n 3p)
             else echo "Unexpected FASTQ count ($n) for {wildcards.srr}: $fq" >&2; exit 1; fi
+            # Validate BEFORE compressing: fasterq-dump/prefetch can be killed mid-write
+            # (node disk full, preemption, timeout) and still leave a file that looks
+            # done. A truncated FASTQ ends mid-record and gzip's own integrity check
+            # cannot catch this (the .gz container closes cleanly either way) - it only
+            # surfaces later as a cryptic STAR "wrong read ID line format" crash,
+            # possibly on a DIFFERENT sample's job that reads this file concatenated
+            # with others. Catch it here instead, so a bad download gets retried
+            # (profile sets retries: 3) rather than silently shipped as "done".
+            bc_lines=$(wc -l < "$bc"); cd_lines=$(wc -l < "$cd")
+            if [ $((bc_lines % 4)) -ne 0 ] || [ $((cd_lines % 4)) -ne 0 ]; then
+                echo "TRUNCATED download for {wildcards.srr}: line counts not a multiple of 4" >&2
+                echo "  $bc: $bc_lines lines (mod4=$((bc_lines % 4)))" >&2
+                echo "  $cd: $cd_lines lines (mod4=$((cd_lines % 4)))" >&2
+                exit 1
+            fi
+            if [ "$bc_lines" -ne "$cd_lines" ]; then
+                echo "MISMATCHED read pair for {wildcards.srr}: R1 has $bc_lines lines, R2 has $cd_lines" >&2
+                exit 1
+            fi
             gzip -c "$bc" > {output.r1}
             gzip -c "$cd" > {output.r2}
                     else
