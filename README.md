@@ -262,6 +262,38 @@ python workflow/scripts/symctx.py show    workflow/scripts/qc_gate.py evaluate
 python workflow/scripts/symctx.py find    workflow/scripts build_matrices
 ```
 
+## Why FASTQs sometimes get silently corrupted (in plain terms)
+
+A downloaded FASTQ can look completely fine — it exists, it's the right rough size,
+`gzip -t` says it's a valid gzip file — and still be broken in a way that quietly
+undercounts reads instead of throwing an error. Three separate causes have shown up
+in practice, all with that same symptom:
+
+1. **A full disk cuts the file off mid-write.** Downloading briefly stages raw data
+   on the compute node's local disk. If that disk is nearly full (often from old
+   junk left behind by previously-killed jobs), a write can get cut off partway
+   through — no error, just a file that ends early, like a sentence stopping
+   mid-word.
+2. **Compression is too slow and the job gets killed first.** After downloading,
+   the FASTQ gets compressed. A single-threaded compressor can take hours on a huge
+   file; if that's longer than the job's time limit, the job gets killed mid-write,
+   again leaving a cut-off file. Fix: use a multi-threaded compressor (`pigz`) so it
+   finishes well inside the time limit.
+3. **A long-running pipeline process can be using yesterday's code.** Snakemake
+   reads its rule definitions once, when it starts, and keeps using that copy for
+   as long as it runs — like a chef working from the recipe they memorized at the
+   start of their shift, even after the cookbook gets updated. If you fix a bug in
+   the pipeline's code while an old run is still going, that run keeps using the
+   old, buggy version until it's restarted.
+
+**How the pipeline catches this:** every write of a compressed FASTQ goes to a
+`.tmp` file first, then gets renamed into place in one instant step — so nothing
+ever reads a half-written file. And the SRA download rule checks, before
+compressing, that the decompressed line count is a clean multiple of 4 (one FASTQ
+record is always exactly 4 lines) and that both paired-end files have the same
+line count — the one reliable way to catch a cut-off file, since the corruption
+usually doesn't show up in the gzip container itself.
+
 ## Chemistry
 
 Defaults are 10x Chromium 3′ **v3**. Supported chemistries:

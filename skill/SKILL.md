@@ -432,6 +432,16 @@ finished?" without re-scanning the trees.
 
 ## Troubleshooting (all fixes stay inside `$PIPE`)
 
+**In plain terms, corrupted-looking FASTQs usually come from one of three causes,
+none of which throw a clean error:** (1) the compute node's local disk was nearly
+full and a write got cut off mid-way; (2) compression was too slow (single-threaded
+`gzip` on a huge file) and the job's time limit killed it before it finished
+writing; (3) a long-running controller loaded the pipeline's rule code once at
+startup, so a bug fix you made on disk never reached jobs it was still dispatching
+— restarting the controller is what makes a fix "live." All three leave a file that
+looks fine (exists, valid gzip) but is truncated — the reliable check is that the
+decompressed line count must be a multiple of 4, not `gzip -t`.
+
 | Symptom | Cause | Fix |
 |---|---|---|
 | Controller submits first job then never advances, though jobs succeed | SLURM executor polls `sacct`; slurmdbd down (`Connection refused …:6819`) | `profiles/slurm/config.yaml`: `slurm-status-command: squeue` + `slurm-no-account: true` (already set). `squeue` is DB-independent; cluster `MinJobAge=300s` keeps finished jobs pollable. |
