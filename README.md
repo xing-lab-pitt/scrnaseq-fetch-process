@@ -288,11 +288,17 @@ in practice, all with that same symptom:
 
 **How the pipeline catches this:** every write of a compressed FASTQ goes to a
 `.tmp` file first, then gets renamed into place in one instant step — so nothing
-ever reads a half-written file. And the SRA download rule checks, before
-compressing, that the decompressed line count is a clean multiple of 4 (one FASTQ
-record is always exactly 4 lines) and that both paired-end files have the same
-line count — the one reliable way to catch a cut-off file, since the corruption
-usually doesn't show up in the gzip container itself.
+ever reads a half-written file. The SRA download rule runs three checks before
+compressing: `vdb-validate` on the freshly prefetched `.sra` file (catches a
+transfer that silently dropped bytes without `prefetch` itself erroring); the
+decompressed line count is a clean multiple of 4, one FASTQ record is always
+exactly 4 lines, and both paired-end files have the same line count (catches a
+cut-off file — the corruption usually doesn't show up in the gzip container
+itself); and every record's `+` separator line is checked against its own header
+(catches a chunk of records dropped from the *middle* of the file, which the
+line-count check alone can miss if the same number of lines vanished from both
+paired files — this is what STAR's "quality string length is not equal to
+sequence length" error usually turns out to be).
 
 ## Chemistry
 

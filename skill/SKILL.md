@@ -439,12 +439,15 @@ full and a write got cut off mid-way; (2) compression was too slow (single-threa
 writing; (3) a long-running controller loaded the pipeline's rule code once at
 startup, so a bug fix you made on disk never reached jobs it was still dispatching
 — restarting the controller is what makes a fix "live." All three leave a file that
-looks fine (exists, valid gzip) but is truncated — the reliable check is that the
-decompressed line count must be a multiple of 4, not `gzip -t`.
+looks fine (exists, valid gzip) but is truncated at the end — the reliable check is
+that the decompressed line count must be a multiple of 4, not `gzip -t`. A 4th,
+rarer defect drops a chunk of records from the *middle* of the file instead of the
+end, which the line-count check alone can miss — see the record-alignment row below.
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Controller submits first job then never advances, though jobs succeed | SLURM executor polls `sacct`; slurmdbd down (`Connection refused …:6819`) | `profiles/slurm/config.yaml`: `slurm-status-command: squeue` + `slurm-no-account: true` (already set). `squeue` is DB-independent; cluster `MinJobAge=300s` keeps finished jobs pollable. |
+| `starsolo` fails with STAR's `quality string length is not equal to sequence length` at a specific read, even though the input file passed the mod4/line-count check | a chunk of records was dropped from the MIDDLE of the file (not the end) during the original download — if both mates lost the same number of lines, total line count and R1=R2 length still look fine, but every record after the gap is misaligned (a header's own `+` line ends up naming a LATER read than its header) | `download_fastq` now checks every record's `+` line against its own header and fails loudly if they don't match. If you hit this on data downloaded before the guard existed, redownload the named SRR — `vdb-validate` on the freshly prefetched `.sra` (also now run automatically) and the record-alignment check together catch this going forward. |
 | `LockException` on start | stale `.snakemake` locks from a killed controller | Verify no live controller (`squeue`), then `snakemake --profile profiles/slurm --unlock` and resubmit. |
 | `prepare_runs.py` HTTP 400 from ENA | transient API error | Re-run; it usually succeeds on retry. |
 | SRX/SRR gives whole-study runs | scoping regression | `build_rows` restricts sub-study accessions; confirm `is_substudy` branch in `prepare_runs.py`. |

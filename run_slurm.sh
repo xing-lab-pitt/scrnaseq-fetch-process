@@ -97,6 +97,7 @@ for t in snakemake STAR samtools fastqc multiqc pigz; do
     command -v "$t" >/dev/null || { echo "MISSING on PATH: $t (see run_slurm.sh header / README)" >&2; exit 1; }
 done
 command -v prefetch >/dev/null || echo "NOTE: prefetch not on PATH (only needed for source=sra runs)" >&2
+command -v vdb-validate >/dev/null || echo "NOTE: vdb-validate not on PATH (only needed for source=sra runs; ships with sra-tools alongside prefetch)" >&2
 
 # download_io=4 caps concurrent download_fastq jobs cluster-wide, so large SRA
 # downloads don't stack up on one node's local disk and saturate its I/O. Override
