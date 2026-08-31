@@ -257,8 +257,13 @@ rule download_fastq:
                 echo "MISMATCHED read pair for {wildcards.srr}: R1 has $bc_lines lines, R2 has $cd_lines" >&2
                 exit 1
             fi
-            pigz -p {threads} -c "$bc" > {output.r1}
-            pigz -p {threads} -c "$cd" > {output.r2}
+            # Write to a temp path first, then mv into place: mv is atomic on the
+            # same filesystem, so a concurrently-running controller or job never
+            # observes a partially-written file at the final output path.
+            pigz -p {threads} -c "$bc" > {output.r1}.tmp
+            pigz -p {threads} -c "$cd" > {output.r2}.tmp
+            mv {output.r1}.tmp {output.r1}
+            mv {output.r2}.tmp {output.r2}
                     else
             # --- ENA: direct download of pre-split FASTQs --------------------
             curl -sSL --fail --retry 5 -o {output.r1} "{params.u1}"

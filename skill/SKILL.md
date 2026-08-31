@@ -342,6 +342,28 @@ size — safe to run over a whole study.
 The resulting `.h5ad` (count matrix in `X`, velocyto layers) is ready for
 downstream scanpy analysis (QC, clustering, UMAP, DE).
 
+### Checking many large FASTQs for corruption (mod4 line-count sweep)
+
+A truncated FASTQ (record boundary cut mid-write, e.g. by a job hitting its time
+limit or a disk filling up) usually still passes `gzip -t` — the gzip container
+closes cleanly either way. The only cheap, reliable check is: decompressed line
+count must be a multiple of 4, and R1/R2 line counts must match.
+
+```bash
+zcat "$f" | wc -l   # mod 4 == 0, and R1 count == R2 count for the pair
+```
+
+Running this serially (or in a single sandboxed process) does not scale: each
+~800M-line file takes ~9 minutes, so a 70-file study takes 10+ hours serially.
+Submit it as its own SLURM job and fan out with `xargs -P`:
+
+```bash
+printf '%s\n' "${files[@]}" | xargs -P 8 -I{} bash -c \
+  'n=$(zcat "{}" | wc -l); echo "{} lines=$n mod4=$((n % 4))"'
+```
+
+8-way parallel brings a 70-file study sweep down to well under an hour.
+
 ### Reading the pipeline's own code cheaply
 
 `workflow/scripts/symctx.py` prints just the slice of Python you need, so reviewing a
@@ -422,6 +444,9 @@ finished?" without re-scanning the trees.
 | Rebuilt STAR index disappears / rebuilds every run | `star_index: ""`, so the resolver builds into the ephemeral `<workdir>/star_index` | Point `reference.star_index` at a writable dir to keep the built index in (e.g. a sibling `STAR_rebuild/`). The resolver builds into that path once, then just symlinks it on later runs. |
 | High genome mapping but ~3% reads mapped to **gene** | someone re-added `--soloBarcodeMate`/`--clip5pNbases` — that clips the separate barcode read down to 0bp of cDNA | Use the standard two-file `starsolo` rule (cDNA read first, barcode read second, no clip). See the comment in `workflow/Snakefile`. |
 | fasterq-dump "cannot connect to external services" on login node | run on login node | Harmless for the rule — it prefetches the `.sra` first, then fasterq-dumps the local file on the compute node (no network). |
+| Same corruption bug recurs on new SRRs after you already fixed and re-verified the Snakefile | a long-running controller process loads the Snakefile into memory once at startup; editing the file on disk does NOT change what jobs it's still dispatching | Kill and restart the controller after any Snakefile edit meant to change in-flight rule behavior — a fix on disk is not live until the controller that's actually submitting jobs is restarted. |
+| A redownloaded/recompressed FASTQ looks corrupted even though the recovery step "succeeded" | compressing straight into the final output path is not atomic; a reader (e.g. Snakemake) can observe a partially-written file mid-write | Write to `<output>.tmp` then `mv` into place — `mv` on the same filesystem is atomic. Already done in `download_fastq`'s SRA branch and in any standalone recovery script that recompresses FASTQs. |
+| Only some files from a batch downloaded during a disk-full/contention window failed loudly downstream | corruption during a resource-constrained window is not limited to the files that happen to error out immediately — a truncated file with valid record boundaries can pass silently into `starsolo` and just produce quietly-wrong counts | When you find ANY corrupt file from a given time window, sweep every file downloaded in that same window, not just the ones that already failed. In one incident, 2 of 6 SRRs from the same window failed loudly, but a full sweep found all 6 were corrupt. |
 
 ## Decision: skill vs. rewriting the pipeline
 
