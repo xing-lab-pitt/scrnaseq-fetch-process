@@ -189,6 +189,15 @@ rule download_fastq:
         sra_bin=config.get("sra_tools_bin", ""),
         tmp=lambda wc: str(FASTQ / f"_sra_{wc.srr}"),
     threads: 4
+    # Custom resource, not a real SLURM allocation: caps how many download_fastq
+    # jobs run at once CLUSTER-WIDE (Snakemake's own DAG scheduler enforces this,
+    # regardless of which node each job lands on). Too many concurrent large SRA
+    # downloads landing on the same node's local disk saturates it (~100% util)
+    # and slows every download on that node, occasionally past its time limit.
+    # Set the cluster-wide budget with `--resources download_io=4` (run_slurm.sh
+    # already does this by default).
+    resources:
+        download_io=1,
     retries: 3
     conda: "../envs/tools.yaml"
     shell:

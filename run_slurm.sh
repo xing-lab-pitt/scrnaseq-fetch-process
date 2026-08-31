@@ -98,4 +98,7 @@ for t in snakemake STAR samtools fastqc multiqc pigz; do
 done
 command -v prefetch >/dev/null || echo "NOTE: prefetch not on PATH (only needed for source=sra runs)" >&2
 
-exec snakemake --profile "$PROFILE" "$@"
+# download_io=4 caps concurrent download_fastq jobs cluster-wide, so large SRA
+# downloads don't stack up on one node's local disk and saturate its I/O. Override
+# with your own --resources download_io=N if needed.
+exec snakemake --profile "$PROFILE" --resources download_io=4 "$@"
