@@ -75,6 +75,7 @@ echo "LAUNCHING WITH configfile: $CONFIGFILE"
 grep -E '^workdir:|^samples_tsv:' "$CONFIGFILE" | sed 's/^/  /'
 echo "If more than one study's config lives in config/, pass --configfile explicitly"
 echo "next time — a bare invocation always defaults to config/config.yaml."
+echo "Targets, if any, must come BEFORE --configfile, or they get swallowed."
 echo "=============================================================="
 
 PROFILE="${SCRNASEQ_PROFILE:-profiles/slurm}"

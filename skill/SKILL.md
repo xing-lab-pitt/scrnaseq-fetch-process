@@ -183,6 +183,14 @@ How to decide the value:
   → "Reads Mapped to Gene: Unique+Multiple Gene". Correct strand ≈ 0.5–0.7; a wrong
   strand collapses it well below 0.1. The QC gate (`qc.min_reads_mapped_gene`) already
   fails a wrong-strand run, so a mistake is caught rather than silently shipped.
+- **Empirical, before the full run** (when the record is unclear): the on-demand
+  `strand_probe` rule aligns the same 1M-read subsample with `Forward` and with `Reverse`
+  (~10 min) and calls the winner only if it beats the other by ≥3×. Targets go before
+  `--configfile`:
+  ```bash
+  sbatch run_slurm.sh <workdir>/qc/strand_probe/<srr>.tsv --configfile config/config.yaml
+  ```
+  A ratio under 3× means the problem is not strand (check reference / chemistry).
 
 **Chemistry guard (pre-write check, can be skipped with `--no-chem-check`):**
 - Warns if detected chemistry mismatches config's expected chemistry (e.g. v2 data but config set for v3).
@@ -214,6 +222,27 @@ gate reads the matching "Reads Mapped to Gene**Full**" column automatically (no 
 This is a per-run toggle; it is **not** auto-detectable — decide it from the assay (single-cell
 vs single-nucleus / nuclei prep) in the GEO/SRA record. Design precedent: Arc Institute's
 scRecounter uses `GeneFull` throughout for exactly this reason.
+
+### Cell-calling threshold (--soloCellFilter) — always set explicitly
+
+STARsolo's default cell-calling filter is a hard knee (`CellRanger2.2 3000 0.99 10`) that
+can silently discard a large share of real cells whenever the true cell count is far from
+3,000; nothing in STAR's log warns about this. Measured on GSE310923: the default kept
+38,556 cells across 12 samples; the same raw matrices re-called with `EmptyDrops_CR` kept
+65,469, with zero previously-called cells lost.
+
+Set `starsolo_cell_filter` in `config/config.yaml` for every new study. Leaving it unset
+passes no flag, so STAR's default applies (this keeps old configs reproducible).
+`config/config.example.yaml` documents the recommended `EmptyDrops_CR` setting and its
+ambient-droplet caveat: a relaxed filter admits more ambient droplets, which matters most
+for tissues with abundant free RNA. To reproduce an existing study exactly, pin the filter
+it actually ran with instead.
+
+To re-call cells on an already-aligned run without re-aligning, use
+`workflow/scripts/recall_cells.py` (wraps `STAR --runMode soloCellFiltering`;
+`--recall-velocyto` re-slices the Velocyto raw matrices, which that STAR mode cannot
+re-call directly because it requires a file literally named `matrix.mtx`). See the
+README's "Cell-calling threshold" section for the invocation.
 
 **Multiple / custom sample lists:** either run `prepare_runs.py` per accession and
 concatenate the TSVs (one header), or hand-write rows. Back up any existing sheet
@@ -302,7 +331,15 @@ orphaned space — do the sweep above periodically on any node this pipeline use
 
 ## Phase 4 — Verify a completed run
 
-Two read-only scripts cover this. Both take the **workdir**, launch nothing, work
+**Check `<workdir>/qc/preflight.tsv` first — it is ready as soon as downloads finish,
+long before alignment does.** The `preflight` rule (in `rule all`, report-only) reads the
+first 1M reads of each run and predicts STAR's "too short" bucket from the reads and the
+config's `outFilterMatchNminOverLread`. A high `pred_too_short_pct` with a high `tso_pct`
+means template-switch-oligo contamination: relax `--outFilterScoreMinOverLread` /
+`--outFilterMatchNminOverLread` in `starsolo_extra` (e.g. 0.30) before the alignment is
+spent. It also cross-checks chemistry (`chem_by_len` vs `wl_chem`) on the real reads.
+
+Two read-only scripts cover the rest. Both take the **workdir**, launch nothing, work
 part-way through a run, and exit non-zero when something is wrong — so they compose
 into a shell gate. Prefer them over ad-hoc `cat`/`grep` of Solo.out: they emit one
 compact table instead of dumping files.
@@ -496,6 +533,12 @@ operational (stale locks) — none argue for abandoning Snakemake.
 > standard `Gene/` matrix as `adata.X`.
 - `workflow/scripts/read_qc.py` — role-aware raw-read QC from FastQC (rule `read_qc`); writes `qc/read_qc.tsv`.
 - `workflow/scripts/reconcile.py` — completeness checker (done-contract, categories/actions); single-workdir or `--manifest`.
+- `workflow/scripts/preflight.py` — pre-alignment read diagnostics (rule `preflight`); writes `qc/preflight.tsv`.
+- `workflow/scripts/strand_probe.py` — Forward vs Reverse on a subsample (on-demand rule `strand_probe`).
+- `workflow/scripts/recall_cells.py` — re-call cells on an existing STARsolo raw matrix with a
+  different `--soloCellFilter`, without re-aligning (`--recall-velocyto` also re-slices Velocyto).
+  Standalone, NOT in the DAG.
+- `workflow/scripts/check_fastq_dropout.awk` — mid-file record-dropout check used by `download_fastq`.
 - `workflow/Snakefile` — rules; `download_fastq` branches on `source`; `read_qc` reporting rule.
 - `profiles/slurm/config.yaml` — SLURM profile + per-rule resources + sacct/squeue fix + `keep-going`/`retries`.
 - `config/config.yaml` — chemistry (umi_len, whitelist), `feature` (Gene/GeneFull), `read_qc` thresholds, reference paths.

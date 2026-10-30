@@ -129,6 +129,17 @@ def probe_barcode_chem(read_url, whitelist_dir, cb_len=16, n_reads=2000, min_fra
     from collections import Counter
     seqs = _fetch_read_seqs(read_url, n_reads=n_reads)
     bcs = Counter(s[:cb_len] for s in seqs if len(s) >= cb_len)
+    return match_whitelists(bcs, whitelist_dir, min_frac=min_frac)
+
+
+def match_whitelists(bcs, whitelist_dir, min_frac=0.5):
+    """Match a Counter of candidate barcodes against every 10x whitelist.
+
+    Split out of probe_barcode_chem so callers that already hold reads — preflight.py
+    reads a LOCAL FASTQ rather than range-requesting a URL — share one implementation
+    instead of duplicating the streaming match. Returns (chem, frac) for the best hit,
+    or (None, best_frac) when nothing reaches min_frac.
+    """
     total = sum(bcs.values())
     if not total:
         return None, 0.0

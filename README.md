@@ -9,6 +9,7 @@ accession ──prepare_runs.py──> samples.tsv
  check_versions (preflight: env must satisfy requirements)
                                    │
  download_fastq ─ fastqc          resolve_star_index (symlink if compatible, else build)
+        │  └─ preflight (read diagnostics, report-only)
         │                              │
         └────────────► starsolo (per sample) ──► qc_gate ──► qc_check (strict)
                              │                       │
@@ -47,6 +48,12 @@ unspliced, or their sum — the layers sit alongside it for RNA velocity.
 - **Per-run toggles** — chemistry, strand (3′/5′), feature (Gene/GeneFull), and the
   over-sequenced-R1 flag are all per-sample sheet columns, so mixed studies (e.g. v2 +
   v3 samples) process correctly in a single run.
+- **Pre-alignment read diagnostics** — `preflight` predicts reads STAR will drop as
+  too short (e.g. template-switch-oligo contamination) from a FASTQ subsample, before
+  an alignment is spent. On-demand `strand_probe` settles 3′ vs 5′ empirically.
+- **Explicit cell calling** — `starsolo_cell_filter` sets `--soloCellFilter` (example
+  config: `EmptyDrops_CR`); `recall_cells.py` re-calls cells on finished runs without
+  re-aligning.
 - **Deterministic QC gate** — pass/fail thresholds live in `config.yaml`
   (version-controlled), applied to STARsolo's `Summary.csv`.
 - **STAR index resolver** — the index is a pipeline output: `resolve_star_index`
@@ -262,6 +269,32 @@ python workflow/scripts/symctx.py show    workflow/scripts/qc_gate.py evaluate
 python workflow/scripts/symctx.py find    workflow/scripts build_matrices
 ```
 
+## Pre-alignment checks
+
+Two checks look at the reads before a full alignment is spent. Both are report-only.
+
+**`preflight`** (in `rule all`, writes `<workdir>/qc/preflight.tsv`) reads the first
+`preflight.n_reads` reads (default 1,000,000) of each run and reports, per run: barcode
+and cDNA read lengths, the chemistry those imply, the best-matching barcode whitelist,
+and the share of cDNA reads that start with the 10x template-switch oligo (TSO), an
+Illumina adapter, a poly-A/T/G run, or low-complexity sequence. Its core check
+predicts STAR's "too short" bucket: STAR drops a read whose matched length is below
+`outFilterMatchNminOverLread` × read length, so the same arithmetic over the reads
+tells you how much a given setting will cost. FastQC misses TSO contamination (its
+adapter module does not know the TSO, and one oligo followed by many different cDNAs
+splits below its overrepresented-sequence threshold), which is why this check exists.
+
+**`strand_probe`** (on demand, not in `rule all`) aligns the same 1,000,000-read
+subsample twice, once with `--soloStrand Forward` and once with `Reverse`, and compares
+reads mapped to gene. The right strand wins by a wide margin; below a 3× ratio it calls
+neither, because the real problem is elsewhere (reference, chemistry). About 10 minutes,
+against a multi-hour alignment with the wrong strand:
+
+```bash
+# targets must come before --configfile
+sbatch run_slurm.sh <workdir>/qc/strand_probe/<srr>.tsv --configfile config/config.yaml
+```
+
 ## Why FASTQs sometimes get silently corrupted (in plain terms)
 
 A downloaded FASTQ can look completely fine — it exists, it's the right rough size,
@@ -392,7 +425,73 @@ fraction, and the QC gate fails it.
 - **`strand`** (per-sample sheet column, or `chemistry.strand` default) — `Forward`
   for 10x **3′** GEX, `Reverse` for 10x **5′** GEX. Not auto-detectable (3′ and 5′
   share the same barcode geometry); set it from the GEO/SRA record. A wrong call
-  collapses the "reads mapped to gene" fraction, which the QC gate catches.
+  collapses the "reads mapped to gene" fraction, which the QC gate catches. When the
+  record is unclear, test it first with the on-demand `strand_probe` rule (see
+  [Pre-alignment checks](#pre-alignment-checks)).
+
+## Cell-calling threshold (--soloCellFilter) — set it explicitly
+
+STARsolo has two independent filters that both cost real cells if left at
+their defaults, and neither one warns when it does.
+
+| filter | flag(s) | decides | STAR's own default | measured on GSE310923 |
+|---|---|---|---|---|
+| read-length | `--outFilterScoreMinOverLread` / `--outFilterMatchNminOverLread` | whether a READ aligns at all | 0.66 / 0.66 | too-short 21.84% -> 2.01% at 0.30 |
+| cell-calling | `--soloCellFilter` (config key `starsolo_cell_filter`) | which barcodes become "cells" in the filtered matrix | `CellRanger2.2 3000 0.99 10` | 38,556 -> 65,469 cells combined with `EmptyDrops_CR`, zero cells lost |
+
+**Read-length filter.** Relax both flags in `starsolo_extra` (e.g. to 0.30) when
+`preflight` predicts a large "too short" bucket, typically from TSO-carrying reads.
+
+**Cell-calling filter.** This one decides which barcodes become "cells",
+independent of whether their reads aligned. Leaving `starsolo_cell_filter`
+unset is not neutral: STAR falls back to its own default, a hard knee that
+keeps only barcodes above `(99th-percentile UMI of the top 3,000)/10`. That
+assumes the true cell count is close to 3,000; on GSE310923 it discarded most
+of the study's real cells. An unset key still means no flag at all, so old
+configs keep producing the cells they always did.
+
+`config/config.example.yaml` sets `EmptyDrops_CR 3000 0.99 10 45000 90000 500
+0.01 20000 0.01 10000` (CellRanger's own defaults, spelled out in full) as the
+recommended starting point for a new study. `EmptyDrops_CR` models the
+ambient RNA background rather than applying a hard UMI-count knee, so it is
+far less sensitive to whether the true cell count matches an assumed top N.
+
+Ambient-droplet caveat: relaxing the filter also admits more ambient
+droplets, which matters most for tissues with abundant free RNA (Lin- bone
+marrow sheds hemoglobin mRNA from lysed erythroblasts). On GSE310923,
+`EmptyDrops_CR` called 13,442 cells the authors did not, and about 4,487 of
+those score as pyrenocytes (enucleating erythroblasts, genuinely
+low-gene-count and hemoglobin-heavy) not yet separated from ambient droplets
+by markers alone. Treat a relaxed cell-calling filter as needing a downstream
+ambient-droplet check on any tissue with a strong free-RNA source.
+
+To reproduce an existing study exactly, pin the filter it actually ran with
+(e.g. `CellRanger2.2 3000 0.99 10`) so a future STAR version's changed default
+cannot silently change its cells on a rerun.
+
+**Re-calling cells on an existing run, without re-aligning.**
+`workflow/scripts/recall_cells.py` wraps `STAR --runMode soloCellFiltering` to
+re-apply a different `--soloCellFilter` to matrices the `starsolo` rule has
+already produced, in minutes instead of hours. It also handles Velocyto: that
+STAR mode requires a file literally named `matrix.mtx`, which the Velocyto
+raw dir does not have (`spliced.mtx`/`unspliced.mtx`/`ambiguous.mtx` instead),
+so `--recall-velocyto` slices those three matrices by the barcode list the
+Gene/GeneFull pass just called, instead of trying to re-filter them directly.
+
+```bash
+python workflow/scripts/recall_cells.py \
+    --raw-root  <workdir>/star \
+    --out-root  <workdir>/star_relaxed \
+    --samples sample1 sample2 ... \
+    --filter "EmptyDrops_CR 3000 0.99 10 45000 90000 500 0.01 20000 0.01 10000" \
+    --recall-velocyto
+```
+
+Not a Snakemake rule and not in the default target: it is a deliberate,
+on-demand re-call of already-aligned data, not something every pipeline run
+should redo automatically. All samples in one invocation get the identical
+`--soloCellFilter` value, by construction — the script takes one `--filter`
+argument for the whole run, not a per-sample option.
 
 ## Batch completeness & the agent loop
 
@@ -525,7 +624,10 @@ config/
 workflow/
   Snakefile               # the DAG
   scripts/                # in-DAG: prepare_runs, ncbi_utils, starsolo_to_h5ad,
-                          #   qc_gate, read_qc, reconcile, ...
+                          #   qc_gate, read_qc, reconcile, preflight,
+                          #   check_fastq_dropout.awk, ...
+                          # on demand: strand_probe.py (3' vs 5'),
+                          #   recall_cells.py (re-call cells, no re-alignment)
                           # read-only inspection (launch nothing, take a workdir):
                           #   inspect_qc.py    QC metrics per sample
                           #   check_layers.py  velocity layers present? why not?

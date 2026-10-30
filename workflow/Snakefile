@@ -127,6 +127,7 @@ rule all:
         QC / "multiqc_report.html",
         QC / "qc_ok.txt",
         QC / "read_qc.tsv",
+        QC / "preflight.tsv",
 
 # ------------------------------ preflight ------------------------------------
 rule check_versions:
@@ -135,7 +136,7 @@ rule check_versions:
     params:
         req=config["requirements_txt"],
         script=f"{SCRIPTS}/check_versions.py",
-    conda: "../envs/scanpy.yaml"
+    conda: "envs/scanpy.yaml"
     shell:
         "python {params.script} {params.req}"
 
@@ -158,7 +159,7 @@ rule resolve_star_index:
         gtf=config["reference"].get("gtf", ""),
         overhang=config["reference"]["sjdb_overhang"],
         script=f"{SCRIPTS}/resolve_star_index.py",
-    conda: "../envs/tools.yaml"
+    conda: "envs/tools.yaml"
     shell:
         r"""
         python {params.script} \
@@ -188,6 +189,7 @@ rule download_fastq:
         m2=lambda wc: RUN.loc[wc.srr, "fastq_2_md5"],
         sra_bin=config.get("sra_tools_bin", ""),
         tmp=lambda wc: str(FASTQ / f"_sra_{wc.srr}"),
+        check_awk=f"{SCRIPTS}/check_fastq_dropout.awk",
     threads: 4
     # Custom resource, not a real SLURM allocation: caps how many download_fastq
     # jobs run at once CLUSTER-WIDE (Snakemake's own DAG scheduler enforces this,
@@ -199,7 +201,7 @@ rule download_fastq:
     resources:
         download_io=1,
     retries: 3
-    conda: "../envs/tools.yaml"
+    conda: "envs/tools.yaml"
     shell:
         r"""
         set -euo pipefail
@@ -236,7 +238,7 @@ rule download_fastq:
                 echo "past killed jobs - check for dirs matching dead job IDs and delete them." >&2
                 exit 1
             fi
-            prefetch -O "$STAGE" {wildcards.srr}
+            prefetch --max-size 100G -O "$STAGE" {wildcards.srr}
             # vdb-validate checks the .sra file's own internal checksums/structure -
             # a silent network interruption during prefetch can drop a chunk of the
             # file without prefetch itself reporting an error (its own "is valid"
@@ -286,17 +288,8 @@ rule download_fastq:
             # record's "+" line either repeats its header's read ID or is bare "+";
             # a header/"+" mismatch proves a mid-file drop happened before this line.
             for f in "$bc" "$cd"; do
-                awk -v f="$f" '
-                    NR % 4 == 1 { h = substr($1, 2) }               # strip leading @
-                    NR % 4 == 3 {
-                        p = substr($1, 2)                            # strip leading +
-                        if (p != "" && p != h) {
-                            print "MISALIGNED records in " f ": header @" h " but \"+\" line names +" p " (record " int(NR/4)+1 ")" > "/dev/stderr"
-                            bad = 1
-                        }
-                    }
-                    END { exit bad }
-                ' "$f" || { echo "Mid-file record dropout detected for {wildcards.srr}" >&2; exit 1; }
+                awk -v f="$f" -f {params.check_awk} "$f" \
+                    || {{ echo "Mid-file record dropout detected for {wildcards.srr}" >&2; exit 1; }}
             done
             # Write to a temp path first, then mv into place: mv is atomic on the
             # same filesystem, so a concurrently-running controller or job never
@@ -325,7 +318,7 @@ rule fastqc:
     threads: 2
     params:
         outdir=lambda wc: str(QC / "fastqc"),
-    conda: "../envs/tools.yaml"
+    conda: "envs/tools.yaml"
     shell:
         "mkdir -p {params.outdir} && "
         "fastqc -t {threads} -o {params.outdir} {input.r1} {input.r2}"
@@ -379,7 +372,25 @@ rule starsolo:
         # disk and runtime.
         solo_features=" ".join(dict.fromkeys(["Gene", FEATURE, "Velocyto"])),
         extra=config["starsolo_extra"],
-    conda: "../envs/tools.yaml"
+        # --soloCellFilter (cell-calling threshold), from config key `starsolo_cell_filter`.
+        # Optional and back-compat: a missing key means STAR gets no --soloCellFilter flag
+        # at all, so it falls back to ITS OWN default (CellRanger2.2 3000 0.99 10) exactly
+        # as it always has. An old config that never set this key must keep producing the
+        # same cells it always did, not silently switch filters.
+        #
+        # Injected here (not in the shared starsolo_extra) so --soloCellFilter is set
+        # exactly once, the same rule the comment above gives for --soloFeatures. STAR's
+        # own default is a hard knee: it keeps only barcodes above (99th-percentile UMI of
+        # the top N)/M, which can silently discard a large fraction of real cells when the
+        # true cell count is far from that top-N assumption. Measured on GSE310923: the
+        # default kept 38,556 of the 12 samples' cells combined; the authors' own processing
+        # kept 65,469. See config/config.example.yaml for
+        # the two filters this pipeline has actually used and why.
+        cell_filter_flag=lambda wc: (
+            f"--soloCellFilter {config['starsolo_cell_filter']}"
+            if config.get("starsolo_cell_filter") else ""
+        ),
+    conda: "envs/tools.yaml"
     # Standard 10x two-file layout: barcode+UMI and cDNA are SEPARATE fastqs
     # (v2 R1=26bp, v3/v4 R1=28bp; R2=cDNA). STARsolo expects the cDNA read
     # FIRST and the CB+UMI read SECOND; the CB/UMI coords below index into
@@ -406,6 +417,7 @@ rule starsolo:
              {params.bc_read_len_flag} \
              --soloFeatures {params.solo_features} \
              --outFileNamePrefix {params.prefix} \
+             {params.cell_filter_flag} \
              {params.extra}
         """
 
@@ -422,7 +434,7 @@ rule qc_report:
         rm=QCC["min_reads_mapped_gene"],
         ec=QCC["min_estimated_cells"],
         script=f"{SCRIPTS}/qc_gate.py",
-    conda: "../envs/scanpy.yaml"
+    conda: "envs/scanpy.yaml"
     shell:
         "python {params.script} {params.entries} "
         "--report {output.report} --passlist {output.passlist} "
@@ -461,7 +473,7 @@ rule to_h5ad:
     params:
         script=f"{SCRIPTS}/starsolo_to_h5ad.py",
         feature=FEATURE,
-    conda: "../envs/scanpy.yaml"
+    conda: "envs/scanpy.yaml"
     shell:
         "python {params.script} {input.solo} -o {output} -s {wildcards.sample} --feature {params.feature}"
 
@@ -473,7 +485,7 @@ rule merge:
         WORK / "combined.h5ad",
     params:
         script=f"{SCRIPTS}/merge_h5ad.py",
-    conda: "../envs/scanpy.yaml"
+    conda: "envs/scanpy.yaml"
     shell:
         "python {params.script} -o {output} --h5ad {input.h5ads}"
 
@@ -488,7 +500,7 @@ rule multiqc:
     params:
         outdir=lambda wc: str(QC),
         scan=lambda wc: f"{QC}/fastqc {ALIGN}",
-    conda: "../envs/tools.yaml"
+    conda: "envs/tools.yaml"
     shell:
         "multiqc -f -o {params.outdir} -n multiqc_report.html {params.scan}"
 
@@ -502,7 +514,7 @@ rule downstream:
     params:
         script=config["tools_dir"] + "/run_pipeline.py",
         outdir=lambda wc, output: str(Path(output[0]).parent),
-    conda: "../envs/scanpy.yaml"
+    conda: "envs/scanpy.yaml"
     shell:
         "python {params.script} {input.matrix} --output {params.outdir}"
 
@@ -512,6 +524,62 @@ rule downstream:
 # cDNA read (strict). NON-FATAL by design — like qc_report, it writes a report and
 # a pass list but never stops the run; the reconciler + batch loop act on it.
 # Defaults keep it working for configs written before the read_qc block existed.
+# Pre-alignment read diagnostics. Depends only on the FASTQs, so it can report BEFORE
+# an alignment is spent: it predicts STAR's "too short" bucket by comparing each read's
+# alignable length against the outFilterMatchNminOverLread in this config. On GSE310923
+# that bucket was 21.8% (TSO contamination) and cost a 6h run to discover. Report-only,
+# like read_qc — the reconciler and the human decide what to do about it.
+rule preflight:
+    input:
+        fastq=expand(str(FASTQ / "{srr}_R{read}.fastq.gz"), srr=ALL_SRR, read=[1, 2]),
+    output:
+        report=QC / "preflight.tsv",
+    params:
+        workdir=str(WORK),
+        samples=config["samples_tsv"],
+        configfile=workflow.configfiles[0] if workflow.configfiles else "config/config.yaml",
+        whitelist_dir=str(Path(config["chemistry"]["whitelist"]).parent),
+        n_reads=config.get("preflight", {}).get("n_reads", 1000000),
+        script=f"{SCRIPTS}/preflight.py",
+    threads: 2
+    conda: "envs/scanpy.yaml"
+    shell:
+        "python {params.script} {params.workdir} "
+        "--samples {params.samples} "
+        "--config {params.configfile} "
+        "--whitelist-dir {params.whitelist_dir} "
+        "--n-reads {params.n_reads} "
+        "-o {output.report}"
+
+
+# ON-DEMAND, deliberately NOT in rule all. --soloStrand is the one setting no amount of
+# read inspection can resolve (3' and 5' have identical barcode geometry), so this runs
+# the experiment: same subsample aligned twice, Forward vs Reverse. ~10 min against the
+# ~2 h a wrong strand otherwise costs. Run it when a study's 3'/5' status is uncertain:
+#   sbatch run_slurm.sh <workdir>/qc/strand_probe/<srr>.tsv --configfile <cfg>
+# Verified on SRR36139195 (known 3'): Forward 0.494 vs Reverse 0.034, 14.5x -> Forward.
+rule strand_probe:
+    input:
+        r1=FASTQ / "{srr}_R1.fastq.gz",
+        r2=FASTQ / "{srr}_R2.fastq.gz",
+        index=STAR_INDEX,
+    output:
+        report=QC / "strand_probe" / "{srr}.tsv",
+    params:
+        workdir=str(WORK),
+        configfile=workflow.configfiles[0] if workflow.configfiles else "config/config.yaml",
+        n_reads=config.get("preflight", {}).get("strand_probe_reads", 1000000),
+        script=f"{SCRIPTS}/strand_probe.py",
+    threads: 8
+    resources:
+        mem_mb=60000,
+    conda: "envs/scanpy.yaml"
+    shell:
+        "python {params.script} {params.workdir} "
+        "--srr {wildcards.srr} --config {params.configfile} "
+        "--n-reads {params.n_reads} --threads {threads} -o {output.report}"
+
+
 rule read_qc:
     input:
         fastqc=expand(str(QC / "fastqc" / "{srr}_R{read}_fastqc.zip"),
@@ -527,7 +595,7 @@ rule read_qc:
         max_adapter_fraction=RQC.get("max_adapter_fraction", 0.10),
         min_barcode_len=RQC.get("min_barcode_len", 24),
         script=f"{SCRIPTS}/read_qc.py",
-    conda: "../envs/scanpy.yaml"
+    conda: "envs/scanpy.yaml"
     shell:
         "python {params.script} "
         "--fastqc-dir {params.fastqc_dir} "

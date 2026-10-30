@@ -105,12 +105,50 @@ feature: Gene
 # RNA-velocity, re-quantification), set "BAM SortedByCoordinate" to emit a
 # coordinate-sorted BAM (Aligned.sortedByCoord.out.bam); coordinate sorting can
 # need extra RAM, so add "--limitBAMsortRAM <bytes>" if STAR reports a sort OOM.
-# NOTE: --soloFeatures is set by the starsolo rule (from `feature` above), so it
-# must NOT appear here — otherwise STARsolo would receive it twice.
+# NOTE: --soloFeatures is set by the starsolo rule (from `feature` above), and
+# --soloCellFilter is set from `starsolo_cell_filter` below, so NEITHER flag must
+# appear here — otherwise STARsolo would receive it twice.
 starsolo_extra: >-
   --soloType CB_UMI_Simple
   --readFilesCommand zcat
   --outSAMtype None
+
+# Cell-calling threshold (--soloCellFilter). Controls which barcodes become "cells"
+# in the filtered matrix; it is independent of the read-length filters above, which
+# decide whether a READ aligns at all.
+#
+# Leaving this key out is not neutral: STAR then applies ITS OWN default
+# (CellRanger2.2 3000 0.99 10), a hard knee that keeps only barcodes above the
+# (99th-percentile UMI of the top 3,000)/10. That default assumes the true cell
+# count is close to 3,000; on a study with more real cells than that, it can
+# silently discard a large fraction of them, with no warning anywhere in the log.
+# Set this key explicitly for every new study rather than relying on the default.
+#
+# EmptyDrops_CR (recommended default) models the ambient RNA background and calls
+# a cell wherever a barcode's profile is statistically distinguishable from it,
+# so it is far less sensitive to the true cell count than the hard-knee default.
+# Measured on GSE310923 (12 samples): the CellRanger2.2 default called 38,556
+# cells combined; EmptyDrops_CR called 65,469, with zero previously-called cells
+# lost, and matched the authors' own deposited cell calls at 99.93% (52,027/52,065
+# barcodes), matched-pair total-count Pearson r = 0.9999 in log space, and
+# per-cell Pearson across 31,293 shared genes with a median of 0.9940.
+#
+# All ten EmptyDrops_CR parameters are spelled out explicitly (rather than left to
+# STAR's own EmptyDrops_CR defaults) so a future STAR version cannot change this
+# study's cell calls just by changing its defaults. In order, per `STAR --help`:
+# nExpectedCells maxPercentile maxMinRatio indMin indMax umiMin umiMinFracMedian
+# candMaxN FDR simN. The values below are CellRanger's own EmptyDrops_CR defaults.
+#
+# Ambient-droplet caveat, not free with this change: relaxing the filter also
+# admits more ambient droplets, which matters most for tissues with abundant free
+# RNA (e.g. Lin- bone marrow sheds hemoglobin mRNA from lysed erythroblasts). On
+# GSE310923, EmptyDrops_CR called 13,442 cells the authors did not, and about
+# 4,487 of those score as pyrenocytes (enucleating erythroblasts, genuinely
+# low-gene-count and hemoglobin-heavy) that have not been separated from ambient
+# droplets by markers alone. Treat EmptyDrops_CR output as needing a downstream
+# ambient-droplet check on any tissue with a strong free-RNA source, not as a
+# free improvement over the default.
+starsolo_cell_filter: "EmptyDrops_CR 3000 0.99 10 45000 90000 500 0.01 20000 0.01 10000"
 
 # Deterministic QC gate on STARsolo Gene/Summary.csv. Thresholds live HERE
 # (version-controlled), not chosen at runtime, so pass/fail is reproducible.
