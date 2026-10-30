@@ -46,8 +46,17 @@
 set -euo pipefail
 
 # Run from the repo root (this script's directory), wherever it was cloned.
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# On clusters where sbatch copies the script into a spool dir before running it
+# (e.g. /var/lib/slurm-llnl/slurmd/job<id>/slurm_script), BASH_SOURCE[0] points
+# at that spool copy, not the real repo -- so prefer SLURM_SUBMIT_DIR (the
+# directory sbatch was invoked from) when running under Slurm. Submit from the
+# repo root: sbatch run_slurm.sh ...
+REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 cd "$REPO_DIR"
+if [ ! -f workflow/Snakefile ]; then
+    echo "ERROR: $REPO_DIR is not the repo root (no workflow/Snakefile). Run sbatch from the repo root." >&2
+    exit 1
+fi
 
 # Visibility guard: a bare invocation with no --configfile silently falls back to
 # Snakemake's default config/config.yaml. That's fine for a single-study clone (see
