@@ -63,6 +63,8 @@ unspliced, or their sum — the layers sit alongside it for RNA velocity.
 - **SLURM-ready** — each rule is submitted as a right-sized job; the included
   profile is resilient to a down `slurmdbd` (polls `squeue`, not `sacct`).
 
+How this compares to bollito and scRecounter: see [COMPARISON.md](COMPARISON.md).
+
 ## Requirements
 
 **Python** (a venv or conda env): `snakemake` ≥ 9.24 with
